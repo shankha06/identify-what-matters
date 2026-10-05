@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "scope": "Broad India-related public discussion discovery, not a representative India population sample.",
+  "geography_policy": "Hashtags and language never establish India geography. Panels are proposals until a human records audited_by, audited_at (timezone-aware), reference and status=human_audited. Panel evidence describes publisher relevance, not the location of authors or commenters.",
+  "panel_policy": "Disabled proposed public accounts; verify handles, public status, India relevance and permissions before enabling. Runtime checks reject private or unknown accounts even if followed by the session.",
+  "limits": {
+    "request_budget": 60,
+    "max_seeds": 8,
+    "posts_per_seed": 3,
+    "recent_posts_per_seed": 2,
+    "top_posts_per_seed": 1,
+    "delay_seconds": 8,
+    "comment_posts": 4,
+    "comment_pages_per_post": 2,
+    "comments_per_post": 12,
+    "reply_parents_per_post": 1,
+    "reply_pages_per_parent": 1,
+    "replies_per_parent": 3,
+    "recent_days": 7
+  },
+  "budget_note": "Includes one login method call and public-status lookups. Caps method calls and private request attempts separately. Library internals may issue extra requests. Server pages may exceed retained-item caps. Do not repeatedly run after blocking errors.",
+  "discovery": {
+    "exploration_fraction": 0.25,
+    "generic_hashtags": ["india", "bharat", "love", "instagood", "instagram", "viral", "trending", "reels", "reelsinstagram", "explore", "explorepage", "fyp", "follow", "followme", "like", "likeforlikes", "photooftheday", "picoftheday", "beautiful", "fashion", "music", "travel", "food", "fitness", "photography"],
+    "policy": "Propose up to 20 new non-generic hashtags from captions published in the recent window and observed on recent/feed sources; retain supporting post IDs and domains. Allocate a proposed 25% of future seed slots to human-reviewed candidates, not automatic expansion. Server recent tabs can still be ranked."
+  },
+  "domains": [
+    {"name": "news_and_civic_discussion", "hashtags": ["indianews", "indiancitizens"], "panels": [{"query": "indianexpress", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed national news panel; human audit pending."}}]},
+    {"name": "economy_and_cost_of_living", "hashtags": ["indianeconomy", "costoflivingindia"], "panels": [{"query": "livemint", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed economy panel; human audit pending."}}]},
+    {"name": "jobs_and_work", "hashtags": ["indianjobs", "worklifeindia"], "panels": []},
+    {"name": "education_and_exams", "hashtags": ["indianeducation", "neetdiscussion"], "panels": []},
+    {"name": "technology_and_ai", "hashtags": ["indiantech", "aiindia"], "panels": [{"query": "gadgets360", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed technology panel; human audit pending."}}]},
+    {"name": "sport", "hashtags": ["indiancricket", "indianfootball"], "panels": [{"query": "indiansuperleague", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed sport panel; human audit pending."}}]},
+    {"name": "cinema_and_streaming", "hashtags": ["indiancinema", "ottindia"], "panels": [{"query": "filmcompanion", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed cinema panel; current activity and human audit pending."}}]},
+    {"name": "music_and_live_events", "hashtags": ["indieindia", "indianmusicfestival"], "panels": []},
+    {"name": "fashion_and_beauty", "hashtags": ["indianstreetwear", "indianbeauty"], "panels": [{"query": "vogueindia", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed fashion panel; human audit pending."}}]},
+    {"name": "food_and_prices", "hashtags": ["indianstreetfood", "foodpricesindia"], "panels": []},
+    {"name": "health_and_wellbeing", "hashtags": ["publichealthindia", "mentalhealthindia"], "panels": []},
+    {"name": "environment_and_weather", "hashtags": ["climateindia", "airpollutionindia"], "panels": [{"query": "down_to_earth_magazine", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed environment panel; human audit pending."}}]},
+    {"name": "transport_and_city_life", "hashtags": ["indianrailways", "urbanindia"], "panels": []},
+    {"name": "travel_and_local_culture", "hashtags": ["indiantourism", "indianculture"], "panels": [{"query": "incredibleindia", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed tourism panel; human audit pending."}}]},
+    {"name": "gaming_and_esports", "hashtags": ["indiangaming", "indianesports"], "panels": []},
+    {"name": "agriculture_and_rural_life", "hashtags": ["indianagriculture", "ruralindia"], "panels": []},
+    {"name": "books_and_language", "hashtags": ["indianliterature", "indianbookstagram"], "panels": []},
+    {"name": "science_and_space", "hashtags": ["indianscience", "isrodiscussion"], "panels": [{"query": "isro.dos", "enabled": false, "india_evidence": {"status": "unknown", "reason": "Proposed space/science panel; human audit pending."}}]}
+  ]
+}

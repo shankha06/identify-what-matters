@@ -1,0 +1,506 @@
+{
+  "description": "Sentinel panel of public Indian Instagram accounts whose posts and comment sections act as a barometer of what India is discussing. One request per account per run reads its latest 12 posts; each post is scored against that account's own baseline. Groups keep the panel balanced across meme/commentary, celebrity, news, regional and sports pages.",
+  "doc_id": "28991540097136703",
+  "accounts": [
+    {
+      "username": "ghantaa",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "rvcjinsta",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "scoopwhoop",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "mensxp",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "sarcasticschool_",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "officialhumansofbombay",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "thebetterindia",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "dhruvrathee",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "voompla",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "viralbhayani",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "instantbollywood",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "pinkvilla",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "manav.manglani",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "filmygyan",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "bollywoodbubble",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "bollywoodhungama",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "filmfare",
+      "group": "celebrity_gossip"
+    },
+    {
+      "username": "ndtv",
+      "group": "news_english"
+    },
+    {
+      "username": "indiatoday",
+      "group": "news_english"
+    },
+    {
+      "username": "timesofindia",
+      "group": "news_english"
+    },
+    {
+      "username": "hindustantimes",
+      "group": "news_english"
+    },
+    {
+      "username": "indianexpress",
+      "group": "news_english"
+    },
+    {
+      "username": "thehindu",
+      "group": "news_english"
+    },
+    {
+      "username": "republicworld",
+      "group": "news_english"
+    },
+    {
+      "username": "thequint",
+      "group": "news_english"
+    },
+    {
+      "username": "theprintindia",
+      "group": "news_english"
+    },
+    {
+      "username": "economictimes",
+      "group": "news_business"
+    },
+    {
+      "username": "moneycontrolcom",
+      "group": "news_business"
+    },
+    {
+      "username": "aajtak",
+      "group": "news_hindi"
+    },
+    {
+      "username": "abpnewstv",
+      "group": "news_hindi"
+    },
+    {
+      "username": "zeenews",
+      "group": "news_hindi"
+    },
+    {
+      "username": "thelallantop",
+      "group": "news_hindi"
+    },
+    {
+      "username": "news24official",
+      "group": "news_hindi"
+    },
+    {
+      "username": "tv9bharatvarsh",
+      "group": "news_hindi"
+    },
+    {
+      "username": "dainikbhaskar",
+      "group": "news_hindi"
+    },
+    {
+      "username": "abpmajhatv",
+      "group": "news_regional"
+    },
+    {
+      "username": "lokmat",
+      "group": "news_regional"
+    },
+    {
+      "username": "abpanandatv",
+      "group": "news_regional"
+    },
+    {
+      "username": "tv9telugu",
+      "group": "news_regional"
+    },
+    {
+      "username": "asianetnews",
+      "group": "news_regional"
+    },
+    {
+      "username": "manoramanews",
+      "group": "news_regional"
+    },
+    {
+      "username": "polimernews",
+      "group": "news_regional"
+    },
+    {
+      "username": "espncricinfo",
+      "group": "sports"
+    },
+    {
+      "username": "crictracker",
+      "group": "sports"
+    },
+    {
+      "username": "indiancricketteam",
+      "group": "sports"
+    },
+    {
+      "username": "sportskeeda",
+      "group": "sports"
+    },
+    {
+      "username": "cricketaddictor",
+      "group": "sports"
+    },
+    {
+      "username": "fayedsouza",
+      "group": "political_commentary"
+    },
+    {
+      "username": "barkha.dutt",
+      "group": "political_commentary"
+    },
+    {
+      "username": "ravishkumar.official",
+      "group": "political_commentary"
+    },
+    {
+      "username": "pmofatish",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "samdishbhatia",
+      "group": "political_commentary"
+    },
+    {
+      "username": "unfilteredbysamdish",
+      "group": "political_commentary"
+    },
+    {
+      "username": "shamsharmashow",
+      "group": "political_commentary"
+    },
+    {
+      "username": "akashbanerjee.in",
+      "group": "political_commentary"
+    },
+    {
+      "username": "andhbhakt_humour",
+      "group": "political_satire"
+    },
+    {
+      "username": "theskinndoctor",
+      "group": "political_satire"
+    },
+    {
+      "username": "nocontext_indianpolitics",
+      "group": "political_satire"
+    },
+    {
+      "username": "newslaundry",
+      "group": "political_commentary"
+    },
+    {
+      "username": "maktoobmedia",
+      "group": "political_commentary"
+    },
+    {
+      "username": "thewirein",
+      "group": "political_commentary"
+    },
+    {
+      "username": "altnews_in",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "boomlive_in",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "mohak.mangal",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "nitishrajpute",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "abhiandniyu",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "beerbiceps",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "openletter.in",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "prashant_dhawan",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "shubhankar.mishra",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "kushaspeaks",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "ajeetbhartii",
+      "group": "political_commentary"
+    },
+    {
+      "username": "sushantsinha",
+      "group": "political_commentary"
+    },
+    {
+      "username": "majorgauravarya",
+      "group": "political_commentary"
+    },
+    {
+      "username": "palkisharmaupadhyay",
+      "group": "political_commentary"
+    },
+    {
+      "username": "thejaipurdialogues",
+      "group": "political_commentary"
+    },
+    {
+      "username": "stringreveals",
+      "group": "political_commentary"
+    },
+    {
+      "username": "thepamphlet_in",
+      "group": "political_commentary"
+    },
+    {
+      "username": "meghupdates",
+      "group": "political_commentary"
+    },
+    {
+      "username": "hindu_post",
+      "group": "political_commentary"
+    },
+    {
+      "username": "vikramadityaspeaks",
+      "group": "political_commentary"
+    },
+    {
+      "username": "kuna_kamra",
+      "group": "political_satire"
+    },
+    {
+      "username": "varungrover",
+      "group": "political_satire"
+    },
+    {
+      "username": "nehasrathore",
+      "group": "political_satire"
+    },
+    {
+      "username": "roflgandhiji_",
+      "group": "political_satire"
+    },
+    {
+      "username": "sarcastic__indian",
+      "group": "political_satire"
+    },
+    {
+      "username": "logical_indian_official",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "article14_india",
+      "group": "political_commentary"
+    },
+    {
+      "username": "caravanmagazine",
+      "group": "political_commentary"
+    },
+    {
+      "username": "chalchitra.talks",
+      "group": "political_commentary"
+    },
+    {
+      "username": "mumbaivoices",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "abhinavbisht_",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "cockroachjantaparty",
+      "group": "political_satire"
+    },
+    {
+      "username": "studentsofindia_",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "civic_delhi",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "bihar_se_hai",
+      "group": "news_regional"
+    },
+    {
+      "username": "up_tak_official",
+      "group": "news_regional"
+    },
+    {
+      "username": "sudhirchaudhary72",
+      "group": "political_commentary"
+    },
+    {
+      "username": "rubikaliyaquat",
+      "group": "political_commentary"
+    },
+    {
+      "username": "chitraaum",
+      "group": "political_commentary"
+    },
+    {
+      "username": "anjanaomkashyap_aok",
+      "group": "political_commentary"
+    },
+    {
+      "username": "saurabhdwivedi",
+      "group": "political_commentary"
+    },
+    {
+      "username": "smitaprakash",
+      "group": "political_commentary"
+    },
+    {
+      "username": "soch_by_mohak",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "nitish_rajput",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "dhruvratheefans",
+      "group": "creator_commentary"
+    },
+    {
+      "username": "samdish",
+      "group": "political_commentary"
+    },
+    {
+      "username": "theprint",
+      "group": "news_english"
+    },
+    {
+      "username": "thewirehindi",
+      "group": "political_commentary"
+    },
+    {
+      "username": "lallantop_cinema",
+      "group": "memes_commentary"
+    },
+    {
+      "username": "ravishkumarfans",
+      "group": "political_commentary"
+    },
+    {
+      "username": "prashant_kishor_official",
+      "group": "political_commentary"
+    },
+    {
+      "username": "janjandekhega",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "dalit_lives_matter",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "indian_national_congress",
+      "group": "political_commentary"
+    },
+    {
+      "username": "bjp4india",
+      "group": "political_commentary"
+    },
+    {
+      "username": "aamaadmiparty",
+      "group": "political_commentary"
+    },
+    {
+      "username": "samajwadiparty",
+      "group": "political_commentary"
+    },
+    {
+      "username": "allindiamim",
+      "group": "political_commentary"
+    },
+    {
+      "username": "dhaval_patel_speaks",
+      "group": "political_commentary"
+    },
+    {
+      "username": "gurgaon_civic_action",
+      "group": "factcheck_civic"
+    },
+    {
+      "username": "bengal_speaks",
+      "group": "news_regional"
+    },
+    {
+      "username": "south_first_official",
+      "group": "news_regional"
+    },
+    {
+      "username": "punjab_kesari_official",
+      "group": "news_regional"
+    },
+    {
+      "username": "gujarat_samachar_official",
+      "group": "news_regional"
+    }
+  ]
+}

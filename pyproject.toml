@@ -1,0 +1,41 @@
+[project]
+name = "identify-what-matters"
+version = "0.1.0"
+description = "Discover trending, emerging, and debated topics in India from social and public signals."
+readme = "README.md"
+authors = [
+    { name = "Shankhadeep Roy", email = "shankhadeep.roy@walmart.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.2",
+    "httpx>=0.28.1",
+    "instagrapi>=3.0.18",
+    "praw>=8.0.3",
+    "python-dotenv>=1.2.4",
+    "requests>=2.31.0",
+    "sentence-transformers>=4.1.0",
+]
+
+[project.scripts]
+identify-what-matters = "identify_what_matters:main"
+identify-what-matters-trends = "identify_what_matters.trends:main"
+
+[project.optional-dependencies]
+train = [
+    "accelerate",
+    "datasets",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
+
+
+[[tool.uv.index]]
+url = "https://pypi.ci.artifacts.walmart.com/artifactory/api/pypi/external-pypi/simple"
+default = true
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = false
