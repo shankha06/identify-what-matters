@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from identify_what_matters.instagram_access import scrub
+from identify_what_matters.utils import get_torch_device
 
 ROOT = Path(__file__).resolve().parents[2] / "artifacts" / "stance-models"
 TONES = ("supportive", "critical", "humorous", "neutral")
@@ -148,7 +149,7 @@ def _load(name: str):
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
     path = ROOT / name
-    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    device = get_torch_device()
     model = AutoModelForSequenceClassification.from_pretrained(path).to(device).eval()
     return AutoTokenizer.from_pretrained(path), model, device
 

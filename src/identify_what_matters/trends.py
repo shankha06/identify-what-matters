@@ -24,6 +24,7 @@ import numpy as np
 
 from identify_what_matters import encoder
 from identify_what_matters.instagram_access import scrub
+from identify_what_matters.utils import hours_since, now, parse_time
 
 CATEGORIES = (
     "politics_governance", "civic_issues", "economy_business", "markets_finance", "jobs_education",
@@ -46,29 +47,6 @@ GENERIC_HASHTAGS = {
 }
 SYSTEM = ("You are a senior analyst of Indian public discussion and social media. Be precise and conservative. "
           "Never invent facts that are not in the provided material. Output only strict JSON.")
-
-
-def now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def parse_time(value):
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
-
-
-def hours_since(value, reference):
-    moment = parse_time(value)
-    return (reference - moment).total_seconds() / 3600 if moment else None
 
 
 def write(path: Path, value) -> None:

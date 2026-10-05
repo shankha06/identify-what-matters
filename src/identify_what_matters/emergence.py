@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from identify_what_matters.utils import parse_time
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT,
     status TEXT, meta TEXT);
@@ -58,17 +60,6 @@ HINGLISH_MARKERS = {"hai", "hain", "nahi", "kya", "bhai", "yaar", "kar", "raha",
 
 def pseudonym(value: Any) -> str | None:
     return hashlib.sha256(str(value).encode()).hexdigest()[:16] if value else None
-
-
-def parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, timezone.utc)
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def language_of(text: str) -> str:

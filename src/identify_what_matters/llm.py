@@ -11,16 +11,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from identify_what_matters.openrouter import OpenRouterClient
+from identify_what_matters.utils import parse_json_payload
 
-
-def parse_json(text: str) -> Any:
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    starts = [index for index in (text.find("{"), text.find("[")) if index >= 0]
-    if not starts:
-        raise ValueError("no JSON in response")
-    start = min(starts)
-    end = max(text.rfind("}"), text.rfind("]"))
-    return json.loads(text[start:end + 1], strict=False)
+parse_json = parse_json_payload
 
 
 class LLM:

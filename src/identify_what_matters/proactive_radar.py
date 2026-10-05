@@ -17,6 +17,8 @@ from collections import Counter
 from datetime import datetime
 from statistics import median
 
+from identify_what_matters.utils import hours_since as _hours_since
+
 # Vernacular & conversational stopwords across English, Hindi, and Hinglish comments
 # to isolate real named entities, places, controversies, and events.
 STOPWORDS = {
@@ -50,13 +52,7 @@ STOPWORDS = {
 
 
 def hours_since(value, reference: datetime) -> float | None:
-    if not value or not reference:
-        return None
-    try:
-        moment = datetime.fromisoformat(value) if isinstance(value, str) else value
-        return max(0.05, (reference - moment).total_seconds() / 3600)
-    except Exception:
-        return None
+    return _hours_since(value, reference, min_hours=0.05)
 
 
 # High-priority political and civic entities, conflict terms, and undercurrent keywords

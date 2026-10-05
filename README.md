@@ -289,9 +289,6 @@ Transform raw run reports into rich, interactive visual HTML dashboards:
 ```bash
 # Generate comprehensive dashboard from the latest run
 uv run python make_full_dashboard.py
-
-# Or generate the specialized debate & stance dashboard
-uv run python generate_dashboard_pro.py
 ```
 
 Open `output/runs/<run_id>/dashboard.html` in your browser:

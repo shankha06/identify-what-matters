@@ -18,6 +18,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from identify_what_matters.openrouter import DEFAULT_MODEL, OpenRouterClient
+from identify_what_matters.utils import (
+    Budget,
+    now_iso as now,
+    parse_json_payload as parse_payload,
+    write_json,
+    write_rows,
+)
 
 MODEL = DEFAULT_MODEL
 DOMAINS = (
@@ -44,26 +51,8 @@ IDENTIFIERS = (
 _lock = threading.Lock()
 
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-
 def unsafe(text):
     return any(re.search(pattern, text) for pattern in IDENTIFIERS)
-
-
-def write_json(target, value):
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
-    temporary.replace(target)
-
-
-def write_rows(target, rows):
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
 
 def regional_for(domain, round_index):
@@ -113,15 +102,6 @@ def prompt_for(domain, round_index, used_titles, style="clean"):
     )
 
 
-def parse_payload(raw):
-    text = raw.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no_json_object")
-    return json.loads(text[start:end + 1], strict=False)
-
-
 def validate(payload, domain, round_index, split=None):
     regional = regional_for(domain, round_index)
     events = payload.get("events") if isinstance(payload, dict) else None
@@ -159,19 +139,6 @@ def validate(payload, domain, round_index, split=None):
                          "round": round_index, "split": split or SPLIT_OF_ROUND[round_index],
                          "title": title.strip(), "distinguishing_fact": fact.strip(), "texts": cleaned})
     return accepted
-
-
-class Budget:
-    def __init__(self, state, max_calls, max_output_tokens):
-        self.state, self.max_calls, self.max_output_tokens = state, max_calls, max_output_tokens
-
-    def reserve(self, expected_output, calls=1):
-        with _lock:
-            used = sum(item.get("output_tokens") or 0 for item in self.state["usage"])
-            if self.state["calls"] + calls > self.max_calls or used + expected_output > self.max_output_tokens:
-                return False
-            self.state["calls"] += calls
-            return True
 
 
 def generate(args):

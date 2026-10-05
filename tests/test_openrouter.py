@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from identify_what_matters.llm import LLM
 from identify_what_matters.openrouter import OpenRouterClient
-from identify_what_matters.topic_corpus import Budget
+from identify_what_matters.utils import Budget
 
 
 class OpenRouterClientTests(unittest.TestCase):
