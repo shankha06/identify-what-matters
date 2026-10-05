@@ -226,11 +226,12 @@ class PoliticalPulseEngine:
                 score = max(int((r.get("engagement") or {}).get("score", 1)), 1)
                 w = math.log1p(score) * 1.5
 
-                # Subreddit priors: r/IndiaSpeaks leans nationalist/BJP, r/india leans anti-incumbent/opposition
-                if sub == "r/IndiaSpeaks":
+                # Subreddit priors: r/IndiaSpeaks and r/indiadiscussion lean nationalist/BJP,
+                # r/india and r/unitedstatesofindia lean anti-incumbent/opposition
+                if sub in ("r/IndiaSpeaks", "r/indiadiscussion"):
                     r_res["bjp_share"] = min(r_res["bjp_share"] + 0.35, 1.0)
                     r_res["neutral_share"] = max(r_res["neutral_share"] - 0.35, 0.0)
-                elif sub == "r/india":
+                elif sub in ("r/india", "r/unitedstatesofindia"):
                     r_res["opp_share"] = min(r_res["opp_share"] + 0.35, 1.0)
                     r_res["neutral_share"] = max(r_res["neutral_share"] - 0.35, 0.0)
 

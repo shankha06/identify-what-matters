@@ -115,6 +115,26 @@
       "group": "news_business"
     },
     {
+      "username": "livemint",
+      "group": "news_business"
+    },
+    {
+      "username": "businessstandard",
+      "group": "news_business"
+    },
+    {
+      "username": "cnbctv18india",
+      "group": "news_business"
+    },
+    {
+      "username": "financialexpress",
+      "group": "news_business"
+    },
+    {
+      "username": "finshots",
+      "group": "news_business"
+    },
+    {
       "username": "aajtak",
       "group": "news_hindi"
     },
@@ -200,6 +220,14 @@
     },
     {
       "username": "ravishkumar.official",
+      "group": "political_commentary"
+    },
+    {
+      "username": "scroll_in",
+      "group": "political_commentary"
+    },
+    {
+      "username": "thecaravanmagazine",
       "group": "political_commentary"
     },
     {

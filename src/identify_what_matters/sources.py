@@ -13,8 +13,21 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-HEADERS = {
-    "Host": "www.reddit.com",
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+HEADERS = BROWSER_HEADERS
+
+REDDIT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:155.0) Gecko/20100101 Firefox/155.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -36,9 +49,29 @@ HEADERS = {
 
 HT = "{https://trends.google.com/trending/rss}"
 NEWS_LANGUAGES = ("en-IN", "hi", "ta", "te", "bn", "mr", "ml", "kn", "gu", "pa")
-NEWS_SECTIONS = ("NATION", "BUSINESS", "ENTERTAINMENT", "SPORTS", "TECHNOLOGY", "HEALTH", "SCIENCE")
-NEWS_SEARCHES = ("viral video", "trending on social media", "netizens react", "sparks outrage", "meme")
-REDDIT_SUBS = ("india", "IndiaSpeaks", "indiasocial", "bollywood", "Cricket", "developersIndia", "IndianStockMarket")
+NEWS_SECTIONS = ("NATION", "BUSINESS", "TECHNOLOGY", "SCIENCE", "HEALTH")
+NEWS_SEARCHES = (
+    "sparks outrage",
+    "protest",
+    "policy reform",
+    "inflation",
+    "rbi monetary policy",
+    "supreme court",
+    "union budget",
+    "election commission",
+    "economic growth",
+)
+REDDIT_SUBS = (
+    "india",
+    "IndiaSpeaks",
+    "unitedstatesofindia",
+    "IndianModerate",
+    "indiadiscussion",
+    "geopoliticsIndia",
+    "IndiaInvestments",
+    "IndianStockMarket",
+    "IndianStreetBets",
+)
 
 
 def _time(value: str | None) -> str | None:
@@ -61,7 +94,7 @@ def _traffic(value: str | None) -> int | None:
 
 
 def google_trends(geo: str = "IN") -> list[dict]:
-    response = requests.get(f"https://trends.google.com/trending/rss?geo={geo}", headers=HEADERS, timeout=20)
+    response = requests.get(f"https://trends.google.com/trending/rss?geo={geo}", headers=BROWSER_HEADERS, timeout=20)
     response.raise_for_status()
     signals = []
     for item in ET.fromstring(response.content).iter("item"):
@@ -78,7 +111,7 @@ def google_trends(geo: str = "IN") -> list[dict]:
 
 
 def google_news(url: str, feed: str, language: str) -> list[dict]:
-    response = requests.get(url, headers=HEADERS, timeout=20)
+    response = requests.get(url, headers=BROWSER_HEADERS, timeout=20)
     response.raise_for_status()
     signals = []
     for item in ET.fromstring(response.content).iter("item"):
@@ -110,7 +143,7 @@ def reddit(subreddit: str) -> list[dict]:
 
     response = session.get(
         f"https://www.reddit.com/r/{subreddit}/hot.json?limit=40",
-        headers={**HEADERS},
+        headers={**REDDIT_HEADERS},
         timeout=15,
     )
     response.raise_for_status()
@@ -128,7 +161,7 @@ def reddit(subreddit: str) -> list[dict]:
 
 def x_trends(country: str = "india", slots: int = 24) -> list[dict]:
     """X (Twitter) trending terms for the last ~24 hourly snapshots (trends24.in), with rank and persistence."""
-    response = requests.get(f"https://trends24.in/{country}/", headers=HEADERS, timeout=20)
+    response = requests.get(f"https://trends24.in/{country}/", headers=BROWSER_HEADERS, timeout=20)
     response.raise_for_status()
     link = re.compile(r'<a[^>]+href="https?://(?:twitter|x)\.com/search\?q=[^"]*"[^>]*>(.*?)</a>', re.S)
     terms: dict[str, dict] = {}
