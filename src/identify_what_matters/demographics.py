@@ -4,6 +4,7 @@ Provides:
   * Deterministic Indian given name & honorific lexicons for gender (male, female, org, unknown).
   * Syntactic, linguistic, and regex rules for age bracket (13-17, 18-24, 25-34, 35-54, 55+, unknown).
   * State and metro location mapping.
+  * ML classifiers for age, gender, mental state, impatience, irrationality, party support.
   * Cross-tabulation of stance and tone across demographic groups with full confidence tracking.
 """
 
@@ -23,17 +24,23 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "demographics_m
 _AGE_MODEL = None
 _GENDER_MODEL = None
 _MENTAL_STATE_MODEL = None
+_IMPATIENCE_MODEL = None
+_IRRATIONALITY_MODEL = None
+_PARTY_MODEL = None
 
 def _get_models():
-    global _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL
+    global _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL, _IMPATIENCE_MODEL, _IRRATIONALITY_MODEL, _PARTY_MODEL
     if _AGE_MODEL is None and (MODELS_DIR / "age_classifier.joblib").exists():
         try:
             _AGE_MODEL = joblib.load(MODELS_DIR / "age_classifier.joblib")
             _GENDER_MODEL = joblib.load(MODELS_DIR / "gender_classifier.joblib")
             _MENTAL_STATE_MODEL = joblib.load(MODELS_DIR / "mental_state_classifier.joblib")
+            _IMPATIENCE_MODEL = joblib.load(MODELS_DIR / "impatience_classifier.joblib")
+            _IRRATIONALITY_MODEL = joblib.load(MODELS_DIR / "irrationality_classifier.joblib")
+            _PARTY_MODEL = joblib.load(MODELS_DIR / "party_support_classifier.joblib")
         except Exception:
             pass
-    return _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL
+    return _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL, _IMPATIENCE_MODEL, _IRRATIONALITY_MODEL, _PARTY_MODEL
 
 # ------------------------------------------------------------------ GENDER LEXICONS ----
 MALE_NAMES = {
@@ -193,7 +200,30 @@ class ProfileDemographics:
     location_city: str | None = None
     location_confidence: float = 0.0
     is_organization: bool = False
+    mental_state: str = "unknown"
+    mental_state_confidence: float = 0.0
+    impatience: str = "neutral"
+    impatience_confidence: float = 0.0
+    irrationality: str = "neutral"
+    irrationality_confidence: float = 0.0
+    party_support: str = "None"
+    party_confidence: float = 0.0
     evidence: list[str] = field(default_factory=list)
+
+
+def _ml_predict(text, model, classes):
+    if model is None or len(text.strip()) < 15:
+        return None, 0.0
+    try:
+        probs = model.predict_proba([text])[0]
+        max_idx = probs.argmax()
+        conf = float(probs[max_idx])
+        cls = str(model.classes_[max_idx])
+        if conf >= 0.35:
+            return cls, round(conf, 2)
+    except Exception:
+        pass
+    return None, 0.0
 
 
 def infer_gender(display_name: str, bio: str = "") -> tuple[str, float, str | None]:
@@ -261,37 +291,30 @@ def infer_age(text: str) -> tuple[str, float, str | None]:
         return "35-54", 0.45, "civic-respect"
 
     # ML Classifier fallback
-    age_m, _, _ = _get_models()
+    age_m, _, _, _, _, _ = _get_models()
     if age_m is not None and len(text.strip()) > 15:
-        try:
-            probs = age_m.predict_proba([text])[0]
-            max_idx = probs.argmax()
-            conf = float(probs[max_idx])
-            bracket = str(age_m.classes_[max_idx])
-            if conf >= 0.35:
-                return bracket, round(conf, 2), "ml-classifier"
-        except Exception:
-            pass
+        cls, conf = _ml_predict(text, age_m, AGE_BRACKETS)
+        if cls:
+            return cls, conf, "ml-classifier"
 
     return "unknown", 0.0, None
 
 
 def infer_location(text: str) -> tuple[str | None, str | None, float]:
     """Infers Indian state and city if mentioned in text or through Indic regional scripts."""
-    # Script-level mental & regional presence
-    if re.search(r"[\u0d00-\u0d7f]", text):  # Malayalam
+    if re.search(r"[\u0d00-\u0d7f]", text):
         return "Kerala", None, 0.85
-    if re.search(r"[\u0b80-\u0bff]", text):  # Tamil
+    if re.search(r"[\u0b80-\u0bff]", text):
         return "Tamil Nadu", None, 0.85
-    if re.search(r"[\u0c00-\u0c7f]", text):  # Telugu
+    if re.search(r"[\u0c00-\u0c7f]", text):
         return "Andhra Pradesh / Telangana", None, 0.85
-    if re.search(r"[\u0c80-\u0cff]", text):  # Kannada
+    if re.search(r"[\u0c80-\u0cff]", text):
         return "Karnataka", None, 0.85
-    if re.search(r"[\u0980-\u09ff]", text):  # Bengali
+    if re.search(r"[\u0980-\u09ff]", text):
         return "West Bengal", None, 0.85
-    if re.search(r"[\u0a80-\u0aff]", text):  # Gujarati
+    if re.search(r"[\u0a80-\u0aff]", text):
         return "Gujarat", None, 0.85
-    if re.search(r"[\u0a00-\u0a7f]", text):  # Gurmukhi / Punjabi
+    if re.search(r"[\u0a00-\u0a7f]", text):
         return "Punjab", None, 0.85
 
     low = text.lower()
@@ -331,69 +354,86 @@ def infer_profile(name_or_handle: str, bio: str = "", location: str = "") -> Pro
 
 
 def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
-    """Infers demographic profile for an individual comment from author_id, text, and metadata."""
+    """Infers demographic and behavioral profile for an individual comment."""
     raw_user = comment.get("user") or {}
     username = raw_user.get("username") or comment.get("username") or ""
     text = comment.get("text", "")
 
     if username:
-        return infer_profile(username, bio=text)
-
-    # First-person self-identification and linguistic cues in comment text
-    g, g_conf, g_ev = "unknown", 0.0, None
-    low = text.lower()
-    words = set(re.findall(r"[a-z]+", low))
-    if re.search(r"\b(as a woman|as a girl|female here|ladki|bhabhi)\b", low):
-        g, g_conf, g_ev = "female", 0.65, "self-ident"
-    elif re.search(r"\b(as a man|as a guy|ladka|bhai|bhaiya)\b", low):
-        g, g_conf, g_ev = "male", 0.65, "self-ident"
-    elif words & FEMALE_CONVERSATIONAL:
-        g, g_conf, g_ev = "female", 0.45, "conversational-cue"
-    elif words & MALE_CONVERSATIONAL:
-        g, g_conf, g_ev = "male", 0.45, "conversational-cue"
+        d = infer_profile(username, bio=text[:200])
     else:
-        # ML Classifier fallback for subtle gender cues
-        _, gen_m, _ = _get_models()
-        if gen_m is not None and len(text.strip()) > 15:
-            try:
-                probs = gen_m.predict_proba([text])[0]
-                max_idx = probs.argmax()
-                conf = float(probs[max_idx])
-                cls = str(gen_m.classes_[max_idx])
-                if cls in ("female", "male") and conf >= 0.45:
-                    g, g_conf, g_ev = cls, round(conf, 2), "ml-classifier"
-            except Exception:
-                pass
+        d = ProfileDemographics()
 
-    a, a_conf, a_ev = infer_age(text)
-    st, city, l_conf = infer_location(text)
+    low = text.lower()
 
-    ev = []
-    if g_ev: ev.append(f"gender:{g_ev}")
-    if a_ev: ev.append(f"age:{a_ev}")
-    if st: ev.append(f"loc:{st}")
+    # Gender conversational cues if username didn't resolve
+    if d.gender == "unknown":
+        if re.search(r"\b(as a woman|as a girl|female here|ladki|bhabhi)\b", low):
+            d.gender, d.gender_confidence, _ = "female", 0.65, "self-ident"
+        elif re.search(r"\b(as a man|as a guy|ladka|bhai|bhaiya)\b", low):
+            d.gender, d.gender_confidence, _ = "male", 0.65, "self-ident"
+        elif any(w in low for w in FEMALE_CONVERSATIONAL):
+            d.gender, d.gender_confidence, _ = "female", 0.45, "conversational-cue"
+        elif any(w in low for w in MALE_CONVERSATIONAL):
+            d.gender, d.gender_confidence, _ = "male", 0.45, "conversational-cue"
 
-    return ProfileDemographics(
-        gender=g,
-        gender_confidence=g_conf,
-        age_bracket=a,
-        age_confidence=a_conf,
-        location_state=st,
-        location_city=city,
-        location_confidence=l_conf,
-        evidence=ev
-    )
+    # Age fallback
+    if d.age_bracket == "unknown":
+        a, a_conf, a_ev = infer_age(text)
+        d.age_bracket, d.age_confidence = a, a_conf
+
+    # ML Classifier fallbacks for all behavioral traits
+    age_m, gen_m, state_m, imp_m, irr_m, party_m = _get_models()
+    combined_text = f"{username} {text}"
+
+    if d.gender == "unknown" and gen_m is not None:
+        cls, conf = _ml_predict(combined_text, gen_m, ["male", "female", "neutral"])
+        if cls:
+            d.gender, d.gender_confidence = cls, conf
+
+    if d.age_bracket == "unknown" and age_m is not None:
+        cls, conf = _ml_predict(combined_text, age_m, AGE_BRACKETS)
+        if cls:
+            d.age_bracket, d.age_confidence = cls, conf
+
+    if d.mental_state == "unknown" and state_m is not None:
+        cls, conf = _ml_predict(text, state_m, sorted(state_m.classes_))
+        if cls:
+            d.mental_state, d.mental_state_confidence = cls, conf
+
+    if d.impatience == "neutral" and imp_m is not None:
+        cls, conf = _ml_predict(text, imp_m, sorted(imp_m.classes_))
+        if cls:
+            d.impatience, d.impatience_confidence = cls, conf
+
+    if d.irrationality == "neutral" and irr_m is not None:
+        cls, conf = _ml_predict(text, irr_m, sorted(irr_m.classes_))
+        if cls:
+            d.irrationality, d.irrationality_confidence = cls, conf
+
+    if d.party_support == "None" and party_m is not None:
+        cls, conf = _ml_predict(text, party_m, sorted(party_m.classes_))
+        if cls:
+            d.party_support, d.party_confidence = cls, conf
+
+    # Heuristic impatience/irrationality
+    if d.impatience == "neutral" and d.mental_state == "Civic Anger & Institutional Skepticism":
+        d.impatience = "impatient"
+        d.impatience_confidence = 0.45
+    if d.irrationality == "neutral" and "conspiracy" in low:
+        d.irrationality = "irrational"
+        d.irrationality_confidence = 0.50
+
+    return d
 
 
 def compute_demographic_breakdowns(topic: dict) -> dict:
-    """Computes demographic cross-tabs (gender, age, location) across topic post creators and commenters.
-    Integrates with debate sides and stance to highlight demographic influence."""
+    """Computes demographic cross-tabs across topic post creators and commenters."""
     brief = topic.get("brief") or {}
     measured = brief.get("measured_opinion") or {}
     media = topic.get("instagram", {}).get("media", [])
     on_topic = set(brief.get("on_topic_codes", []))
 
-    # 1. Author Demographics (Post creators)
     authors_seen = set()
     author_gender_counts = Counter()
     author_age_counts = Counter()
@@ -421,8 +461,6 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
 
     total_authors = len(authors_seen) or 1
 
-    # 2. Commenter demographics & Stance Cross-Tabs
-    # Read from media comments if available, or fall back to brief.comment_pool
     comments_pool = [c for m in media if not on_topic or m.get("code") in on_topic
                      for c in m.get("comments", []) if c.get("text")]
     if not comments_pool and brief.get("comment_pool"):
@@ -432,9 +470,13 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
     comment_gender_counts = Counter()
     comment_age_counts = Counter()
     comment_loc_counts = Counter()
+    impatience_counts = Counter()
+    irrationality_counts = Counter()
+    party_counts = Counter()
 
     side_demographics = [{"side": i, "position": s.get("position", ""),
-                          "gender": Counter(), "age": Counter()}
+                          "gender": Counter(), "age": Counter(),
+                          "impatience": Counter(), "irrationality": Counter(), "party": Counter()}
                          for i, s in enumerate(sides)]
 
     comm_known_gender = 0
@@ -447,6 +489,9 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         comment_age_counts[demo.age_bracket] += 1
         if demo.location_state:
             comment_loc_counts[demo.location_state] += 1
+        impatience_counts[demo.impatience] += 1
+        irrationality_counts[demo.irrationality] += 1
+        party_counts[demo.party_support] += 1
 
         if demo.gender != "unknown":
             comm_known_gender += 1
@@ -459,10 +504,12 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         if isinstance(side_idx, int) and 0 <= side_idx < len(sides):
             side_demographics[side_idx]["gender"][demo.gender] += 1
             side_demographics[side_idx]["age"][demo.age_bracket] += 1
+            side_demographics[side_idx]["impatience"][demo.impatience] += 1
+            side_demographics[side_idx]["irrationality"][demo.irrationality] += 1
+            side_demographics[side_idx]["party"][demo.party_support] += 1
 
     total_comments = len(comments_pool) or 1
 
-    # Format side breakdowns
     formatted_sides = []
     for sd in side_demographics:
         g_tot = sum(sd["gender"].values()) or 1
@@ -471,12 +518,17 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
             "position": sd["position"],
             "gender_split": {k: round(v / g_tot, 2) for k, v in sd["gender"].items() if k != "unknown"},
             "top_age": max(sd["age"].items(), key=lambda x: x[1])[0] if sd["age"] else "unknown",
+            "impatience_share": {k: round(v / sum(sd["impatience"].values()), 2) for k, v in sd["impatience"].items()},
+            "irrationality_share": {k: round(v / sum(sd["irrationality"].values()), 2) for k, v in sd["irrationality"].items()},
+            "party_support": {k: round(v / sum(sd["party"].values()), 2) for k, v in sd["party"].items()},
         })
 
-    # Blended audience profile for this topic
     blended_gender = Counter()
     blended_age = Counter()
     blended_loc = Counter()
+    blended_imp = Counter()
+    blended_irr = Counter()
+    blended_party = Counter()
 
     for k, v in author_gender_counts.items():
         blended_gender[k] += v
@@ -493,6 +545,13 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
     for k, v in comment_loc_counts.items():
         blended_loc[k] += v
 
+    for k, v in impatience_counts.items():
+        blended_imp[k] += v
+    for k, v in irrationality_counts.items():
+        blended_irr[k] += v
+    for k, v in party_counts.items():
+        blended_party[k] += v
+
     total_audience = (len(authors_seen) + len(comments_pool)) or 1
     total_known_gender = author_known_gender + comm_known_gender
     total_known_age = author_known_age + comm_known_age
@@ -507,7 +566,6 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         "location_resolved_pct": round((total_known_loc / total_audience) * 100, 1),
     }
 
-    # Significant demographic signals
     skews = []
     gen_known = sum(v for k, v in blended_gender.items() if k in ("male", "female"))
     if gen_known >= 5:
@@ -530,21 +588,21 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
     if top_regs:
         skews.append(f"Key regional focus: {', '.join(top_regs)}")
 
-    # 3. Psychological Archetypes / Mental State Distribution
-    mental_counts = Counter()
-    _, _, state_m = _get_models()
-    if state_m is not None:
-        texts_to_score = [c.get("text", "") for c in comments_pool if len(c.get("text", "").strip()) > 10]
-        if texts_to_score:
-            try:
-                preds = state_m.predict(texts_to_score[:100])
-                for p in preds:
-                    mental_counts[str(p)] += 1
-            except Exception:
-                pass
+    imp_total = sum(blended_imp.values()) or 1
+    imp_dist = {k: round(v / imp_total, 2) for k, v in blended_imp.items()}
+    if imp_dist.get("impatient", 0) >= 0.55:
+        skews.append("High impatience in audience discourse")
 
-    total_mental = sum(mental_counts.values()) or 1
-    mental_distribution = {k: round(v / total_mental, 2) for k, v in mental_counts.items()}
+    irr_total = sum(blended_irr.values()) or 1
+    irr_dist = {k: round(v / irr_total, 2) for k, v in blended_irr.items()}
+    if irr_dist.get("irrational", 0) >= 0.30:
+        skews.append("Elevated irrationality markers detected")
+
+    party_total = sum(blended_party.values()) or 1
+    party_dist = {k: round(v / party_total, 2) for k, v in blended_party.items()}
+    top_parties = [k for k, v in party_dist.items() if v >= 0.10 and k != "None"]
+    if top_parties:
+        skews.append(f"Political leanings: {', '.join(top_parties)}")
 
     return {
         "coverage": coverage,
@@ -552,6 +610,9 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         "age_distribution": {k: round(v / total_audience, 2) for k, v in blended_age.items()},
         "top_regions": top_regs,
         "side_breakdowns": formatted_sides,
-        "mental_state_distribution": mental_distribution,
+        "mental_state_distribution": {},
+        "impatience_distribution": imp_dist,
+        "irrationality_distribution": irr_dist,
+        "party_support_distribution": party_dist,
         "signals": skews,
     }
