@@ -16,6 +16,7 @@ HANDLE = re.compile(r"@[\w.]+")
 URL = re.compile(r"https?://\S+|www\.\S+")
 PHONE = re.compile(r"(?<!\w)\+?\d[\d\s-]{8,}\d(?!\w)")
 UNAVAILABLE_ACCOUNT_ERRORS = {"PrivateAccount", "UserNotFound", "NotFoundError"}
+HIKER_CONCURRENCY = 15
 
 load_dotenv()
 
@@ -157,7 +158,7 @@ class HikerTransport:
         self.request_budget = request_budget
         self.used = 0
         self._lock = asyncio.Lock()
-        self._slots = asyncio.Semaphore(10)
+        self._slots = asyncio.Semaphore(HIKER_CONCURRENCY)
         self.captured_at = datetime.now(timezone.utc).isoformat()
         self.capture = {"captured_at": self.captured_at, "searches": {}, "comments": {}, "hashtags": {},
                         "feeds": {}, "profiles": {}, "totals": {}, "errors": []}
@@ -322,7 +323,9 @@ class HikerTransport:
 
         # Serve from cache if fresh enough (within TTL); unavailable accounts are re-checked weekly
         cached = self.feed_cache.get(username)
-        if cached:
+        # NotFoundError on a known user ID is a suspect API failure, so re-fetch instead of trusting the cache
+        suspect = bool(cached) and cached.get("unavailable") == "NotFoundError" and username in self.user_ids
+        if cached and not suspect:
             age = (now - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
             ttl = self.feed_ttl * 28 if cached.get("unavailable") else self.feed_ttl
             if age < ttl:
@@ -331,6 +334,7 @@ class HikerTransport:
                 return [normalize_media(m, "@" + username) for m in items]
 
         uid = self.user_ids.get(username)
+        known_id = uid is not None
         new_items, fetch_error = None, None
         try:
             if uid is None:
@@ -342,11 +346,15 @@ class HikerTransport:
                     self.id_cache_path.parent.mkdir(parents=True, exist_ok=True)
                     self.id_cache_path.write_text(json.dumps(self.user_ids, indent=1))
             await self._before()
-            new_items, _end_cursor = await self._api("user_medias_chunk_v1", user_id=uid)
+            # user_medias_chunk_v1 returns NotFoundError for valid accounts; g2 serves the same media items
+            new_items = ((await self._api("user_medias_g2", user_id=uid)).get("response") or {}).get("items", [])
+            for item in new_items:  # g2 prefixes the timestamp key
+                if "taken_at" not in item and "1ltaken_at" in item:
+                    item["taken_at"] = item["1ltaken_at"]
         except BudgetExhausted:
             raise
         except HikerAPIError as error:
-            if error.exc_type not in UNAVAILABLE_ACCOUNT_ERRORS:
+            if error.exc_type not in UNAVAILABLE_ACCOUNT_ERRORS or (error.exc_type == "NotFoundError" and known_id):
                 raise
             async with self._lock:
                 self.feed_cache[username] = {"fetched_at": now.isoformat(), "items": [], "unavailable": error.exc_type}

@@ -8,6 +8,7 @@ grounded in contextual debate topics and verified vernacular phrases.
 """
 
 from collections import Counter, defaultdict
+from functools import lru_cache
 import math
 from pathlib import Path
 import re
@@ -28,10 +29,12 @@ def _get_neural_party_model():
             _NEURAL_PARTY_TOKENIZER = AutoTokenizer.from_pretrained(_BERT_PARTY_DIR)
             _NEURAL_PARTY_MODEL = AutoModelForSequenceClassification.from_pretrained(_BERT_PARTY_DIR)
             _NEURAL_PARTY_MODEL.eval()
+            _NEURAL_PARTY_MODEL.to("cuda" if torch.cuda.is_available() else "cpu")
         except Exception:
             _NEURAL_PARTY_MODEL = None
     return _NEURAL_PARTY_TOKENIZER, _NEURAL_PARTY_MODEL
 
+@lru_cache(maxsize=65536)
 def predict_party_neural(text: str) -> Optional[Tuple[str, float]]:
     tok, mod = _get_neural_party_model()
     if tok is None or mod is None or not text.strip():
@@ -43,6 +46,7 @@ def predict_party_neural(text: str) -> Optional[Tuple[str, float]]:
         else:
             idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
         enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        enc = {k: v.to(next(mod.parameters()).device) for k, v in enc.items()}
         with torch.no_grad():
             logits = mod(**enc).logits
             probs = torch.softmax(logits, dim=-1)[0]
