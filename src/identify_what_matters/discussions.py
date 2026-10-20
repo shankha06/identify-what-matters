@@ -208,7 +208,8 @@ def _build_commenter_overlap(bundle: dict) -> dict:
 async def collect_instagram(plan: dict, transport, reference, panel: dict, terms: list[dict],
                            panel_comment_posts: int = 100, term_comment_posts: int = 25, seed_hashtags: int = 25,
                            baselines: dict[str, dict] | None = None, early_comment_posts: int = 40,
-                           comment_posts: int = 3, panel_total_budget: int = 800) -> dict:
+                           comment_posts: int = 3, panel_total_budget: int = 800,
+                           deep_comment_pages: int = 4, deep_reply_threads: int = 6) -> dict:
     """Every Instagram request of a run, in priority order (budget may end the run early). No LLM calls."""
     bundle = {"feeds": {}, "missing_accounts": [], "terms": {}, "probes": {}, "seeds": {}, "comments": {},
               "stopped": None}
@@ -381,7 +382,8 @@ async def collect_instagram(plan: dict, transport, reference, panel: dict, terms
         deep_targets += [m for m in ranked if not m.get("comments")]
 
     async def _do_deep_comment(media):
-        sampled = await call(transport.comments, media["id"], _timeout=150, max_pages=2, max_reply_threads=3)
+        sampled = await call(transport.comments, media["id"], _timeout=150,
+                             max_pages=deep_comment_pages, max_reply_threads=deep_reply_threads)
         if sampled:
             bundle["comments"][media["code"]] = sampled
             media["comments"] = sampled["comments"]

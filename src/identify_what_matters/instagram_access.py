@@ -267,7 +267,8 @@ class HikerTransport:
             seen_cursors.add(next_page_id)
             page_id = next_page_id
 
-        replied = sorted((c for c in all_comments if c["reply_count"]), key=lambda c: -c["reply_count"])
+        replied = sorted((c for c in all_comments if c["reply_count"]),
+                         key=lambda c: (-(c["like_count"] or 0), -c["reply_count"]))
         for thread in replied[:max_reply_threads]:
             await self._before()
             try:

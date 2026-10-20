@@ -1322,8 +1322,10 @@ def run_collect(args, run_dir: Path) -> dict:
     if transport:
         panel = load_panel(args.panel)
         bundle = asyncio.run(collect_instagram(plan, transport, parse_time(transport.captured_at), panel, terms,
-                                              comment_posts=getattr(args, "comment_posts", 3),
-                                              panel_total_budget=getattr(args, "panel_total_budget", 800)))
+                                              comment_posts=getattr(args, "comment_posts", 8),
+                                              panel_total_budget=getattr(args, "panel_total_budget", 800),
+                                              deep_comment_pages=getattr(args, "comment_pages", 4),
+                                              deep_reply_threads=getattr(args, "reply_threads", 6)))
         transport.close(run_dir / "instagram_capture.json")
         from identify_what_matters.account_discovery import record_run_observations, write_proposals as write_account_proposals
         record_run_observations(bundle, panel, run_dir.name)
@@ -1637,7 +1639,9 @@ def main() -> None:
     parser.add_argument("--request-budget", type=int, default=1500, help="Instagram requests per run")
     parser.add_argument("--panel-total-budget", type=int, default=800,
                         help="Requests per run spent on verified comment totals for panel posts (cached across runs)")
-    parser.add_argument("--comment-posts", type=int, default=4, help="Top posts per probed topic to sample deep comments from")
+    parser.add_argument("--comment-posts", type=int, default=8, help="Top posts per probed topic to sample deep comments from")
+    parser.add_argument("--comment-pages", type=int, default=4, help="Comment pages fetched per deep-sampled post")
+    parser.add_argument("--reply-threads", type=int, default=6, help="Reply threads expanded per deep-sampled post")
     parser.add_argument("--comments-per-post", type=int, default=25, help="Max ranked comments per post to include in pool")
     parser.add_argument("--comment-pool-size", type=int, default=120, help="Max total comments per topic brief pool")
     parser.add_argument("--llm-max-calls", type=int, default=400)
