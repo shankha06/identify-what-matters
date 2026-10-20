@@ -71,19 +71,36 @@ def _get_neural_demographics_model():
             _NEURAL_DEMO_MODEL = None
     return _NEURAL_DEMO_TOKENIZER, _NEURAL_DEMO_MODEL, _NEURAL_DEMO_CONFIG
 
-@lru_cache(maxsize=65536)
-def _neural_demo_probs(text: str):
-    """Cached (mental, age) softmax vectors for one text. One forward pass per unique text."""
+_NEURAL_DEMO_CACHE: dict[str, tuple] = {}
+
+
+def prewarm_neural_demographics(texts: list[str], batch_size: int = 64) -> None:
+    """Run the contrastive demographic model over unseen texts in padded batches and cache (mental, age) softmax vectors."""
     tok, mod, _ = _get_neural_demographics_model()
-    if tok is None or mod is None or not text.strip():
-        return None
-    enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+    if tok is None or mod is None:
+        return
+    todo = list(dict.fromkeys(t for t in texts if t and t.strip() and t not in _NEURAL_DEMO_CACHE))
+    if not todo:
+        return
     device = next(mod.parameters()).device
-    with torch.no_grad():
-        m_logits, a_logits, _, _ = mod(enc["input_ids"].to(device), enc["attention_mask"].to(device))
-        m_probs = torch.softmax(m_logits, dim=-1)[0].cpu().numpy()
-        a_probs = torch.softmax(a_logits, dim=-1)[0].cpu().numpy()
-    return m_probs, a_probs
+    for start in range(0, len(todo), batch_size):
+        chunk = todo[start:start + batch_size]
+        enc = tok(chunk, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            m_logits, a_logits, _, _ = mod(enc["input_ids"].to(device), enc["attention_mask"].to(device))
+            m_probs = torch.softmax(m_logits, dim=-1).cpu().numpy()
+            a_probs = torch.softmax(a_logits, dim=-1).cpu().numpy()
+        for text, m_p, a_p in zip(chunk, m_probs, a_probs):
+            _NEURAL_DEMO_CACHE[text] = (m_p, a_p)
+
+
+def _neural_demo_probs(text: str):
+    """(mental, age) softmax vectors for one text, served from the batch cache."""
+    if not text.strip():
+        return None
+    if text not in _NEURAL_DEMO_CACHE:
+        prewarm_neural_demographics([text])
+    return _NEURAL_DEMO_CACHE.get(text)
 
 
 def predict_demographics_neural(text: str) -> tuple[tuple[str, float] | None, tuple[str, float] | None]:
@@ -118,28 +135,46 @@ def _get_bert_party_model():
             _BERT_PARTY_MODEL = None
     return _BERT_PARTY_TOKENIZER, _BERT_PARTY_MODEL
 
-@lru_cache(maxsize=65536)
-def predict_party_neural(text: str) -> tuple[str, float] | None:
-    """Predict political party leaning using fine-tuned neural transformer."""
+_NEURAL_PARTY_CACHE: dict[str, tuple[str, float] | None] = {}
+
+
+def _party_idx2label(mod) -> list[str]:
+    if hasattr(mod.config, "id2label") and mod.config.id2label:
+        return [mod.config.id2label[i] for i in range(len(mod.config.id2label))]
+    return ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
+
+
+def prewarm_party_neural(texts: list[str], batch_size: int = 64) -> None:
+    """Run the party model over unseen texts in padded batches and cache (label, confidence) results."""
     tok, mod = _get_bert_party_model()
-    if tok is None or mod is None or not text.strip():
-        return None
-    try:
-        if hasattr(mod.config, "id2label") and mod.config.id2label:
-            idx2party = [mod.config.id2label[i] for i in range(len(mod.config.id2label))]
-        else:
-            idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
-        enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-        enc = {k: v.to(next(mod.parameters()).device) for k, v in enc.items()}
+    if tok is None or mod is None:
+        return
+    todo = list(dict.fromkeys(t for t in texts if t and t.strip() and t not in _NEURAL_PARTY_CACHE))
+    if not todo:
+        return
+    idx2party = _party_idx2label(mod)
+    device = next(mod.parameters()).device
+    for start in range(0, len(todo), batch_size):
+        chunk = todo[start:start + batch_size]
+        enc = tok(chunk, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
-            logits = mod(**enc).logits
-            probs = torch.softmax(logits, dim=-1)[0]
-            idx = torch.argmax(probs).item()
-            label = idx2party[idx] if idx < len(idx2party) else "None"
-            conf = float(probs[idx].item())
-            return label, conf
-    except Exception:
+            probs = torch.softmax(mod(**enc).logits, dim=-1)
+            conf, idx = probs.max(dim=-1)
+        for text, i, c in zip(chunk, idx.tolist(), conf.tolist()):
+            _NEURAL_PARTY_CACHE[text] = (idx2party[i] if i < len(idx2party) else "None", float(c))
+
+
+def predict_party_neural(text: str) -> tuple[str, float] | None:
+    """Predict political party leaning using fine-tuned neural transformer (served from the batch cache)."""
+    if not text.strip():
         return None
+    if text not in _NEURAL_PARTY_CACHE:
+        try:
+            prewarm_party_neural([text])
+        except Exception:
+            return None
+    return _NEURAL_PARTY_CACHE.get(text)
 
 def _get_models():
     global _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL, _IMPATIENCE_MODEL, _IRRATIONALITY_MODEL, _PARTY_MODEL

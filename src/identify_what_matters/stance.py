@@ -170,50 +170,76 @@ def _probs(name: str, pairs: list[tuple[str, str]]):
 SARCASTIC_EMOJIS = set("😂🤣😜😏🤡💀")
 
 
-def label_comments(context: str, positions: list[str], comments: list[str]) -> list[dict]:
+def label_comments_batch(jobs: list[tuple[str, list[str], list[str]]]) -> list[list[dict]]:
+    """Label several (context, positions, comments) jobs with one batched pass per model (tone and stance)."""
     threshold = json.loads((ROOT / "stance" / "stance_threshold.json").read_text())["threshold"] \
         if (ROOT / "stance" / "stance_threshold.json").exists() else 0.35
-    tones = _probs("tone", [(context, c) for c in comments])
-    labels = []
-    for i, (c, p) in enumerate(zip(comments, tones)):
-        tone = TONES[max(range(len(TONES)), key=p.__getitem__)]
-        sarcastic = any(e in c for e in SARCASTIC_EMOJIS) or (tone == "humorous" and any(w in c.lower() for w in ("lol", "lmao", "sarcasm", "waah", "kya baat")))
-        labels.append({"c": i, "tone": tone, "sarcastic": sarcastic, "side": None})
+    tone_pairs, stance_pairs = [], []
+    for context, positions, comments in jobs:
+        tone_pairs += [(context, c) for c in comments]
+        stance_pairs += [(f"{context} || Position: {p}", c) for c in comments for p in positions]
+    tones = _probs("tone", tone_pairs) if tone_pairs else []
+    backs = _probs("stance", stance_pairs) if stance_pairs else []
+    results, tone_at, back_at = [], 0, 0
+    for context, positions, comments in jobs:
+        labels = []
+        for i, c in enumerate(comments):
+            p = tones[tone_at]
+            tone_at += 1
+            tone = TONES[max(range(len(TONES)), key=p.__getitem__)]
+            sarcastic = any(e in c for e in SARCASTIC_EMOJIS) or (tone == "humorous" and any(w in c.lower() for w in ("lol", "lmao", "sarcasm", "waah", "kya baat")))
+            labels.append({"c": i, "tone": tone, "sarcastic": sarcastic, "side": None})
+        if positions:
+            for i, label in enumerate(labels):
+                row = [backs[back_at + i * len(positions) + k][1] for k in range(len(positions))]
+                best = max(range(len(positions)), key=row.__getitem__)
+                if row[best] >= threshold:
+                    label["side"] = best
+            back_at += len(comments) * len(positions)
+        results.append(labels)
+    return results
 
-    if positions:
-        backs = _probs("stance", [(f"{context} || Position: {p}", c) for c in comments for p in positions])
-        for i, label in enumerate(labels):
-            row = [backs[i * len(positions) + k][1] for k in range(len(positions))]
-            best = max(range(len(positions)), key=row.__getitem__)
-            if row[best] >= threshold:
-                label["side"] = best
-    return labels
+
+def label_comments(context: str, positions: list[str], comments: list[str]) -> list[dict]:
+    return label_comments_batch([(context, positions, comments)])[0]
+
+
+def model_opinions(topics: list[dict]) -> list[dict | None]:
+    """measured_opinion for many topics at once; all their comments share batched model passes."""
+    from identify_what_matters.trends import measured_opinion
+    outputs: list[dict | None] = [None] * len(topics)
+    jobs, slots = [], []
+    for index, topic in enumerate(topics):
+        brief = topic.get("brief") or {}
+        on_topic = set(brief.get("on_topic_codes", []))
+        pool = [c for m in topic.get("instagram", {}).get("media", []) if m["code"] in on_topic
+                for c in m.get("comments", []) if c.get("text")]
+        if not pool:
+            continue
+        debate = brief.get("debate") or {}
+        positions = [s["position"] for s in debate.get("sides", []) if isinstance(s, dict) and s.get("position")] \
+            if debate.get("is_debate") else []
+        context = f"{topic['title']}. {brief.get('summary', '')}"[:240] + f" || Q: {(debate.get('question') or '')[:160]}"
+
+        # Noise filter comments before labeling
+        noise_evals = filter_noise(context, [c["text"] for c in pool], min_similarity=0.45)
+        clean_indices = [ne["index"] for ne in noise_evals if not ne["is_noise"]]
+        filtered_pool = [pool[i] for i in clean_indices]
+        if not filtered_pool:
+            filtered_pool = pool
+
+        jobs.append((context, positions, [scrub(c["text"])[:300] for c in filtered_pool]))
+        slots.append((index, debate, positions, pool, filtered_pool))
+
+    for labels, (index, debate, positions, pool, filtered_pool) in zip(label_comments_batch(jobs), slots):
+        opinion = measured_opinion({"debate": debate if positions else {}, "comment_labels": labels}, filtered_pool)
+        if opinion:
+            opinion["source"] = "local stance/tone model"
+            opinion["noise_filtered"] = len(pool) - len(filtered_pool)
+        outputs[index] = opinion
+    return outputs
 
 
 def model_opinion(topic: dict) -> dict | None:
     """measured_opinion over all sampled comments on the topic's on-topic posts, labelled by the local models."""
-    from identify_what_matters.trends import measured_opinion
-    brief = topic.get("brief") or {}
-    on_topic = set(brief.get("on_topic_codes", []))
-    pool = [c for m in topic.get("instagram", {}).get("media", []) if m["code"] in on_topic
-            for c in m.get("comments", []) if c.get("text")]
-    if not pool:
-        return None
-    debate = brief.get("debate") or {}
-    positions = [s["position"] for s in debate.get("sides", []) if isinstance(s, dict) and s.get("position")] \
-        if debate.get("is_debate") else []
-    context = f"{topic['title']}. {brief.get('summary', '')}"[:240] + f" || Q: {(debate.get('question') or '')[:160]}"
-
-    # Noise filter comments before labeling
-    noise_evals = filter_noise(context, [c["text"] for c in pool], min_similarity=0.45)
-    clean_indices = [ne["index"] for ne in noise_evals if not ne["is_noise"]]
-    filtered_pool = [pool[i] for i in clean_indices]
-    if not filtered_pool:
-        filtered_pool = pool
-
-    labels = label_comments(context, positions, [scrub(c["text"])[:300] for c in filtered_pool])
-    opinion = measured_opinion({"debate": debate if positions else {}, "comment_labels": labels}, filtered_pool)
-    if opinion:
-        opinion["source"] = "local stance/tone model"
-        opinion["noise_filtered"] = len(pool) - len(filtered_pool)
-    return opinion
+    return model_opinions([topic])[0]

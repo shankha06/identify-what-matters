@@ -359,8 +359,9 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
     authors_6h = len({m.get("author_id") for m in young})
     authors_24h = len({m.get("author_id") for m in day})
     authors_7d = len({m.get("author_id") for _, m in aged})
-    max_over = max((m["panel"]["over_comments"] for m in early if m.get("panel")), default=0.0)
-    max_lift = max((m["panel"]["ratio_lift"] for m in early if m.get("panel")), default=0.0)
+    # Likes-only posts carry None for over_comments/ratio_lift; treat them as 0.
+    max_over = max(((m["panel"].get("over_comments") or 0.0) for m in early if m.get("panel")), default=0.0)
+    max_lift = max(((m["panel"].get("ratio_lift") or 0.0) for m in early if m.get("panel")), default=0.0)
     comment_rate = sum((m.get("comment_count") or 0) / max(age, 0.5) for age, m in aged if age <= 12)
     comments_total = sum(m.get("comment_count") or 0 for _, m in aged)
     sampled = [c for _, m in aged for c in m.get("comments", [])]

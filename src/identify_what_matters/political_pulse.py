@@ -34,27 +34,44 @@ def _get_neural_party_model():
             _NEURAL_PARTY_MODEL = None
     return _NEURAL_PARTY_TOKENIZER, _NEURAL_PARTY_MODEL
 
-@lru_cache(maxsize=65536)
-def predict_party_neural(text: str) -> Optional[Tuple[str, float]]:
+_NEURAL_PARTY_CACHE: dict[str, Optional[Tuple[str, float]]] = {}
+
+
+def prewarm_party_neural(texts: List[str], batch_size: int = 64) -> None:
+    """Run the party model over unseen texts in padded batches and cache (label, confidence) results."""
+    import torch
     tok, mod = _get_neural_party_model()
-    if tok is None or mod is None or not text.strip():
-        return None
-    try:
-        import torch
-        if hasattr(mod.config, "id2label") and mod.config.id2label:
-            idx2party = [mod.config.id2label[i] for i in range(len(mod.config.id2label))]
-        else:
-            idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
-        enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-        enc = {k: v.to(next(mod.parameters()).device) for k, v in enc.items()}
+    if tok is None or mod is None:
+        return
+    todo = list(dict.fromkeys(t for t in texts if t and t.strip() and t not in _NEURAL_PARTY_CACHE))
+    if not todo:
+        return
+    if hasattr(mod.config, "id2label") and mod.config.id2label:
+        idx2party = [mod.config.id2label[i] for i in range(len(mod.config.id2label))]
+    else:
+        idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
+    device = next(mod.parameters()).device
+    for start in range(0, len(todo), batch_size):
+        chunk = todo[start:start + batch_size]
+        enc = tok(chunk, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
-            logits = mod(**enc).logits
-            probs = torch.softmax(logits, dim=-1)[0]
-            idx = torch.argmax(probs).item()
-            label = idx2party[idx] if idx < len(idx2party) else "None"
-            return label, float(probs[idx].item())
-    except Exception:
+            probs = torch.softmax(mod(**enc).logits, dim=-1)
+            conf, idx = probs.max(dim=-1)
+        for text, i, c in zip(chunk, idx.tolist(), conf.tolist()):
+            _NEURAL_PARTY_CACHE[text] = (idx2party[i] if i < len(idx2party) else "None", float(c))
+
+
+def predict_party_neural(text: str) -> Optional[Tuple[str, float]]:
+    """Party label and confidence for one text (served from the batch cache)."""
+    if not text.strip():
         return None
+    if text not in _NEURAL_PARTY_CACHE:
+        try:
+            prewarm_party_neural([text])
+        except Exception:
+            return None
+    return _NEURAL_PARTY_CACHE.get(text)
 
 
 def predict_party_neural_distribution(text: str) -> Optional[Dict[str, float]]:

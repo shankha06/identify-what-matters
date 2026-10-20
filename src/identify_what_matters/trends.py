@@ -1571,8 +1571,8 @@ def run_measure(args, run_dir: Path, llm) -> dict:
     step(f"briefs done; LLM {llm.usage()}")
     from identify_what_matters import stance
     if stance.available():
-        for topic in [t for t in measured if t.get("brief")]:
-            opinion = stance.model_opinion(topic)
+        targets = [t for t in measured if t.get("brief")]
+        for topic, opinion in zip(targets, stance.model_opinions(targets)):
             if opinion:
                 topic["brief"]["measured_opinion"] = opinion
 

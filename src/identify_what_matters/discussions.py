@@ -506,7 +506,8 @@ def discover_discussions(bundle: dict, terms: list[dict], llm, reference, max_cl
     civic_clf = None
     try:
         from identify_what_matters.civic_classifier import CivicClassifier
-        civic_clf = CivicClassifier(device="cpu")
+        from identify_what_matters.utils import get_torch_device
+        civic_clf = CivicClassifier(device=get_torch_device())
     except Exception:
         civic_clf = None
 
@@ -514,20 +515,27 @@ def discover_discussions(bundle: dict, terms: list[dict], llm, reference, max_cl
         caps = " ".join(m.get("caption") or "" for m in g)
         if spam_pattern.search(caps) and not any(m.get("panel", {}).get("group") in ("news", "political") for m in g):
             continue
+        clean_candidates.append(g)
 
-        # If civic classifier is active, tag group with max civic relevance score
-        if civic_clf is not None:
+    # Civic scores for all surviving groups in one batched pass (previously one model call per group).
+    if civic_clf is not None:
+        civic_jobs = []
+        for g in clean_candidates:
             group_caps = [scrub(m.get("caption") or "") for m in g if len(scrub(m.get("caption") or "")) >= 25]
             if group_caps:
-                try:
-                    preds = civic_clf.predict(group_caps[:5])
-                    max_civic = max(p.get("score", 0.0) for p in preds)
-                    for m in g:
-                        m["civic_score"] = max_civic
-                except Exception:
-                    pass
-
-        clean_candidates.append(g)
+                civic_jobs.append((g, group_caps[:5]))
+        try:
+            civic_preds = civic_clf.predict([cap for _, group_caps in civic_jobs for cap in group_caps]) if civic_jobs else []
+        except Exception:
+            civic_preds = []
+        offset = 0
+        for g, group_caps in civic_jobs:
+            group_preds = civic_preds[offset:offset + len(group_caps)]
+            offset += len(group_caps)
+            if group_preds:
+                max_civic = max(p.get("score", 0.0) for p in group_preds)
+                for m in g:
+                    m["civic_score"] = max_civic
     candidates = sorted(clean_candidates, key=strength, reverse=True)[:max_clusters]
     if not candidates:
         return []

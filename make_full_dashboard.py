@@ -456,6 +456,21 @@ for r in reddit_signals:
     if rtitle and rtitle not in signals_by_title:
         signals_by_title[rtitle] = r
 
+# Batch the per-comment neural model calls once up front; the per-topic loop below reads cached results.
+from src.identify_what_matters.demographics import prewarm_neural_demographics, prewarm_party_neural as prewarm_demo_party
+from src.identify_what_matters.political_pulse import prewarm_party_neural as prewarm_pulse_party
+_neural_texts = []
+for _t in topics:
+    _neural_texts += [str(c.get('text') or '') for c in ((_t.get('brief') or {}).get('comment_pool') or [])]
+    _neural_texts += [str(c.get('text') or '') for c in ((_t.get('reddit_proxy') or {}).get('comment_excerpts') or [])]
+try:
+    prewarm_neural_demographics(_neural_texts)
+    prewarm_demo_party(_neural_texts)
+    prewarm_pulse_party(_neural_texts)
+    print(f'[dashboard] batched neural prewarm over {len(set(_neural_texts))} unique comment texts')
+except Exception as _error:
+    print(f'[dashboard] batched neural prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
+
 topics_client = []
 for idx, t in enumerate(topics):
     key = t.get('topic_key') or f"t{idx+1}"
