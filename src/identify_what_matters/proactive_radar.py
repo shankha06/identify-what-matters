@@ -401,6 +401,7 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
 
     # Neural trajectory model calibration if topic text is present
     topic_text = " ".join(filter(None, [topic.get("title"), (topic.get("brief") or {}).get("summary")]))
+    neural_reason = None
     if topic_text.strip():
         try:
             from identify_what_matters.strategic_classifier import classify_strategic
@@ -418,7 +419,7 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
                 mapped_stage = stage_map.get(n_stage)
                 if mapped_stage and stage in ("simmering", "quiet", "pre_breakout"):
                     stage = mapped_stage
-                    reasons.append(f"Strategic neural classifier detected {n_stage.replace('_', ' ')} dynamics ({n_conf:.0%} conf)")
+                    neural_reason = f"Strategic neural classifier detected {n_stage.replace('_', ' ')} dynamics ({n_conf:.0%} conf)"
         except Exception:
             pass
 
@@ -435,6 +436,8 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
     if growth:
         reasons.append(f"Instagram heat {'up' if growth >= 1 else 'down'} {abs(growth - 1):.0%} since the last run")
     reasons.append("no news coverage yet" if publishers == 0 else f"{publishers} news publisher(s)")
+    if neural_reason:
+        reasons.append(neural_reason)
     return {"stage": stage, "score": round(score, 3), "reasons": reasons,
             "signals": {"newest_hours": round(newest, 2), "authors_6h": authors_6h, "authors_24h": authors_24h,
                         "max_over_comments": max_over, "max_ratio_lift": max_lift,

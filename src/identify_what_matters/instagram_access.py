@@ -163,7 +163,7 @@ class HikerTransport:
                         "feeds": {}, "profiles": {}, "totals": {}, "errors": []}
         self.totals_cache: dict = json.loads(TOTALS_CACHE_PATH.read_text()) if TOTALS_CACHE_PATH.exists() else {}
         self.request_cache: dict = json.loads(REQUEST_CACHE_PATH.read_text()) if REQUEST_CACHE_PATH.exists() else {}
-        for section in ("searches", "hashtags", "threads"):
+        for section in ("searches", "hashtags", "threads", "first_pages"):
             self.request_cache.setdefault(section, {})
         self._cache_dirty = False
         self._cache_flushed_at = time.monotonic()
@@ -227,15 +227,40 @@ class HikerTransport:
         key = str(media_id)
         entry = self.request_cache["threads"].get(key)
         if _is_fresh(entry, THREAD_TTL_SECONDS) and entry["max_pages"] >= max_pages \
-                and entry["max_reply_threads"] >= max_reply_threads:
+                and entry["max_reply_threads"] >= max_reply_threads \
+                and entry.get("max_comments", 100) >= max_comments:
             all_comments, total = entry["comments"], entry["total"]
         else:
-            all_comments, total = await self._fetch_thread(media_id, max_pages, max_reply_threads)
-            await self._remember("threads", key, {"comments": all_comments, "total": total,
-                                                  "max_pages": max_pages, "max_reply_threads": max_reply_threads})
+            all_comments, total = await self._fetch_thread(media_id, max_pages, max_reply_threads, max_comments)
+            await self._remember("threads", key, {"comments": all_comments, "total": total, "max_pages": max_pages,
+                                                  "max_reply_threads": max_reply_threads, "max_comments": max_comments})
         async with self._lock:
             self.capture["comments"][key] = {"comments": all_comments, "comment_count": total}
         return {"comments": all_comments, "total": total}
+
+    async def _get_page(self, media_id: str, page_id: str | None) -> dict | None:
+        """One media_comments_v2 page; a fresh cached first page is served without a request."""
+        key = str(media_id)
+        if page_id is None:
+            cached = self.request_cache["first_pages"].get(key)
+            if _is_fresh(cached, THREAD_TTL_SECONDS):
+                return cached
+        await self._before()
+        try:
+            raw = await self._api("media_comments_v2", id=media_id, page_id=page_id)
+        except HikerAPIError as error:
+            if error.exc_type != "NotFoundError":
+                raise
+            return {"comments": [], "comment_count": 0, "next_page_id": None}
+        if not isinstance(raw, dict):
+            return None
+        payload = raw.get("response") or {}
+        page = {"comments": [nc for nc in (normalize_comment(c) for c in payload.get("comments", [])) if nc],
+                "comment_count": payload.get("comment_count"),
+                "next_page_id": raw.get("next_page_id") or payload.get("next_min_id")}
+        if page_id is None:
+            await self._remember("first_pages", key, page)
+        return page
 
     async def _fetch_thread(self, media_id: str, max_pages: int, max_reply_threads: int,
                             max_comments: int = 100) -> tuple[list, int | None]:
@@ -245,23 +270,13 @@ class HikerTransport:
         total = None
 
         for _ in range(max_pages):
-            await self._before()
-            try:
-                raw = await self._api("media_comments_v2", id=media_id, page_id=page_id)
-            except HikerAPIError as error:
-                if error.exc_type == "NotFoundError":
-                    break
-                raise
-            if not isinstance(raw, dict):
+            page = await self._get_page(media_id, page_id)
+            if page is None:
                 break
-            payload = raw.get("response", {}) if isinstance(raw, dict) else {}
             if total is None:
-                total = payload.get("comment_count")
-            for c in payload.get("comments", []):
-                nc = normalize_comment(c)
-                if nc:
-                    all_comments.append(nc)
-            next_page_id = raw.get("next_page_id") or payload.get("next_min_id")
+                total = page["comment_count"]
+            all_comments.extend(page["comments"])
+            next_page_id = page["next_page_id"]
             if not next_page_id or next_page_id in seen_cursors or len(all_comments) >= max_comments:
                 break
             seen_cursors.add(next_page_id)
@@ -404,19 +419,13 @@ class HikerTransport:
         if cached and not totals_due(cached, now):
             total = cached["total"]
         else:
-            await self._before()
-            try:
-                raw = await self._api("media_comments_v2", id=media_id, page_id=None)
-            except HikerAPIError as error:
-                if error.exc_type != "NotFoundError":
-                    return None
-                total = 0
-            else:
-                total = (raw.get("response") or {}).get("comment_count") if isinstance(raw, dict) else None
-                if total is None:
-                    return None
+            page = await self._get_page(media_id, None)
+            if page is None or page["comment_count"] is None:
+                return None
+            total = int(page["comment_count"])
             async with self._lock:
-                self.totals_cache[key] = {"total": int(total), "fetched_at": now.isoformat(), "taken_at": taken_at}
+                self.totals_cache[key] = {"total": total, "fetched_at": page.get("fetched_at", now.isoformat()),
+                                          "taken_at": taken_at}
                 TOTALS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
                 TOTALS_CACHE_PATH.write_text(json.dumps(self.totals_cache))
         async with self._lock:

@@ -72,6 +72,22 @@ def _require(*keys):
 
 # ---------------------------------------------------------------- stories
 
+def publisher_first(members: list[dict]) -> dict[str, str]:
+    """Earliest publish time per outlet among a story's members."""
+    first: dict[str, datetime] = {}
+    for member in members:
+        publisher, published = member.get("publisher"), parse_time(member.get("published_at"))
+        if publisher and published and (publisher not in first or published < first[publisher]):
+            first[publisher] = published
+    return {name: moment.isoformat() for name, moment in first.items()}
+
+
+def publisher_pickup(first: dict[str, str]) -> str | None:
+    """When the third distinct outlet carried the story; None with fewer than three."""
+    times = sorted(parse_time(value) for value in first.values())
+    return times[2].isoformat() if len(times) >= 3 else None
+
+
 def build_stories(signals: list[dict], reference: datetime, max_age_hours: float = 48) -> list[dict]:
     fresh = [s for s in signals if s.get("published_at") is None
              or (hours_since(s["published_at"], reference) or 0) <= max_age_hours]
@@ -92,6 +108,7 @@ def build_stories(signals: list[dict], reference: datetime, max_age_hours: float
             if len(titles) >= 4:
                 break
         times = [m["published_at"] for m in members if m.get("published_at")]
+        first_by_publisher = publisher_first(members)
         stories.append({
             "story_id": f"c{index}", "titles": titles, "signals": [m["signal_id"] for m in members],
             "publishers": len({m.get("publisher") for m in members if m.get("publisher")}),
@@ -101,6 +118,7 @@ def build_stories(signals: list[dict], reference: datetime, max_age_hours: float
             "reddit_engagement": sum((m.get("engagement") or {}).get("comments") or 0 for m in members),
             "social_feed_hits": sum(1 for m in members if m["feed"].startswith("news_search:")),
             "earliest": min(times) if times else None, "latest": max(times) if times else None,
+            "publisher_first": first_by_publisher, "pickup_at": publisher_pickup(first_by_publisher),
         })
     return stories
 
@@ -195,6 +213,10 @@ def merge_topics(topics: list[dict], by_story: dict, llm) -> list[dict]:
     result = []
     for index, topic in enumerate(merged.values()):
         stories = [by_story[s] for s in dict.fromkeys(topic["story_ids"]) if s in by_story]
+        first_by_publisher: dict[str, str] = {}
+        for story in stories:
+            for publisher, when in story.get("publisher_first", {}).items():
+                first_by_publisher[publisher] = min(first_by_publisher.get(publisher, when), when, key=parse_time)
         topic.update({
             "topic_key": f"t{index}", "origin": "news_and_search",
             "headlines": [title for story in stories for title in story["titles"]][:6],
@@ -206,6 +228,7 @@ def merge_topics(topics: list[dict], by_story: dict, llm) -> list[dict]:
             "reddit_engagement": sum(s["reddit_engagement"] for s in stories),
             "earliest": min((s["earliest"] for s in stories if s["earliest"]), default=None),
             "latest": max((s["latest"] for s in stories if s["latest"]), default=None),
+            "publisher_first": first_by_publisher, "pickup_at": publisher_pickup(first_by_publisher),
         })
         result.append(topic)
     return result
@@ -494,7 +517,10 @@ def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, co
     )
     result = llm.json(prompt, SYSTEM, validate=_require("summary", "on_topic", "discussion_level"))
     result["on_topic_codes"] = [media[i]["code"] for i in result.get("on_topic", []) if isinstance(i, int) and 0 <= i < len(media)]
-    result["measured_opinion"] = measured_opinion(result, pool)
+    opinion = measured_opinion(result, pool)
+    if opinion:
+        opinion["source"] = "LLM brief labels"
+    result["measured_opinion"] = opinion
     result["comment_pool"] = [{"text": scrub(c["text"])[:200], "likes": c.get("like_count") or c.get("comment_like_count") or 0,
                                "replies": c.get("reply_count") or c.get("child_comment_count") or 0,
                                "author_id": str((c.get("user") or {}).get("pk") or c.get("author_id") or ""),
@@ -570,13 +596,67 @@ def instagram_metrics(topic: dict, reference: datetime) -> dict:
     sampled = [c for m in relevant for c in m.get("comments", [])]
     metrics.update({
         "panel_accounts": len({p["account"] for p in panel}),
-        "panel_max_over": max((p["over_comments"] for p in panel), default=0.0),
-        "panel_max_ratio_lift": max((p["ratio_lift"] for p in panel), default=0.0),
+        "panel_max_over": max(((p["over_comments"] or 0.0) for p in panel), default=0.0),
+        "panel_max_ratio_lift": max(((p["ratio_lift"] or 0.0) for p in panel), default=0.0),
         "comment_like_ratio": round(metrics["comments_7d"] / max(metrics["likes_7d"], 1), 3),
         "replies_per_comment": round(sum(c.get("reply_count") or 0 for c in sampled) / len(sampled), 2) if sampled else 0.0,
+        "comments_scored": sum(len(m.get("comments", [])) for m in relevant),
+        "comments_platform": sum(m["comment_count"] or 0 for m in relevant),
     })
+    metrics["comment_coverage"] = (round(min(metrics["comments_scored"] / metrics["comments_platform"], 1.0), 3)
+                                   if metrics["comments_platform"] else None)
     metrics["discussion_level"] = discussion_level(metrics)
     return metrics
+
+
+def lead_lag(topic: dict) -> dict:
+    """Instagram versus news timing; a positive lead_vs_news_hours means Instagram posted first."""
+    media = topic.get("instagram", {}).get("media", [])
+    if topic.get("brief"):
+        on_topic = set(topic["brief"].get("on_topic_codes", []))
+        media = [m for m in media if m.get("code") in on_topic]
+    first_post = min((parse_time(m.get("taken_at")) for m in media if m.get("taken_at")), default=None)
+    news, pickup = parse_time(topic.get("earliest")), parse_time(topic.get("pickup_at"))
+    result = {"instagram_first_at": first_post.isoformat() if first_post else None,
+              "news_first_at": news.isoformat() if news else None,
+              "pickup_at": pickup.isoformat() if pickup else None,
+              "lead_vs_news_hours": None, "lead_vs_pickup_hours": None}
+    if first_post is None:
+        result["verdict"] = "no_instagram_evidence"
+    elif news is None:
+        result["verdict"] = "instagram_only"
+    else:
+        lead = round((news - first_post).total_seconds() / 3600, 1)
+        result["lead_vs_news_hours"] = lead
+        if pickup:
+            result["lead_vs_pickup_hours"] = round((pickup - first_post).total_seconds() / 3600, 1)
+        result["verdict"] = "instagram_first" if lead >= 1 else "news_first" if lead <= -1 else "simultaneous"
+    return result
+
+
+def lead_lag_summary(topics: list[dict]) -> dict:
+    leads = [t["lead"]["lead_vs_news_hours"] for t in topics
+             if (t.get("lead") or {}).get("lead_vs_news_hours") is not None]
+    verdicts = Counter((t.get("lead") or {}).get("verdict", "not_measured") for t in topics)
+    return {"verdicts": dict(verdicts), "compared_with_news": len(leads),
+            "median_lead_vs_news_hours": round(median(leads), 1) if leads else None}
+
+
+def stage_history(timeline: list[dict], stage: str | None, reference: datetime) -> dict:
+    """Breakout-stage transitions across earlier runs, and hours spent in the current stage."""
+    stages = [(p["at"], p["stage"]) for p in timeline if p.get("stage")]
+    transitions = [{"from": before, "to": after, "at": at}
+                   for (_, before), (at, after) in zip(stages, stages[1:]) if before != after]
+    if stage and stages and stages[-1][1] != stage:
+        transitions.append({"from": stages[-1][1], "to": stage, "at": reference.isoformat()})
+    started = reference
+    for at, value in reversed(stages):
+        if value != stage:
+            break
+        started = parse_time(at)
+    return {"stage": stage, "runs_observed": len(timeline) + 1,
+            "stage_hours": round((reference - started).total_seconds() / 3600, 1),
+            "transitions": transitions[-5:]}
 
 
 def discussion_level(metrics: dict) -> str:
@@ -767,17 +847,14 @@ class History:
         claimed = set()
         for topic, vector, best in zip(topics, vectors, decisions):
             topic["_vector"] = vector.astype(np.float32)
+            topic["timeline"] = []
             if best and best not in claimed:
                 claimed.add(best)
                 topic["topic_id"], topic["first_seen"] = best, first_seen[best]
-                previous = self.db.execute("SELECT trend_score, instagram_heat, at, payload FROM observations WHERE topic_id=? "
-                                           "ORDER BY at DESC LIMIT 1", (best,)).fetchone()
-                if previous:
-                    counts = json.loads(previous[3]).get("instagram_metrics", {}).get("hashtag_counts", {})
-                    topic["previous"] = {"trend_score": previous[0], "instagram_heat": previous[1], "at": previous[2],
-                                         "hashtag_counts": counts}
-                else:
-                    topic["previous"] = None
+                topic["timeline"] = self.timeline(best)
+                latest = topic["timeline"][-1] if topic["timeline"] else None
+                topic["previous"] = ({"trend_score": latest["trend_score"], "instagram_heat": latest["instagram_heat"],
+                                      "at": latest["at"], "hashtag_counts": latest["hashtag_counts"]} if latest else None)
             else:
                 topic["topic_id"] = f"T{reference.strftime('%Y%m%d%H%M')}-{topic['topic_key']}"
                 topic["first_seen"], topic["previous"] = reference.isoformat(), None
@@ -795,6 +872,19 @@ class History:
                                  topic["scores"]["instagram_heat"], topic["scores"]["news_heat"],
                                  json.dumps({k: v for k, v in topic.items() if not k.startswith("_") and k != "instagram"},
                                             ensure_ascii=False, default=str)))
+
+    def timeline(self, topic_id: str, limit: int = 200) -> list[dict]:
+        """Earlier observations of one topic, oldest first: breakout stage, heat and press per run."""
+        rows = self.db.execute("SELECT at, trend_score, instagram_heat, news_heat, payload FROM observations "
+                               "WHERE topic_id=? ORDER BY at DESC LIMIT ?", (topic_id, limit)).fetchall()
+        points = []
+        for at, trend_score, instagram_heat, news_heat, payload in reversed(rows):
+            data = json.loads(payload)
+            points.append({"at": at, "trend_score": trend_score, "instagram_heat": instagram_heat,
+                           "news_heat": news_heat, "stage": (data.get("breakout") or {}).get("stage"),
+                           "publishers": data.get("publishers"),
+                           "hashtag_counts": (data.get("instagram_metrics") or {}).get("hashtag_counts", {})})
+        return points
 
     def runs(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
@@ -828,6 +918,9 @@ def status(topic: dict, reference: datetime) -> str:
     topic["hashtag_posts_per_hour"] = hashtag_growth(topic, reference)
     fresh_on_instagram = ig["posts_24h"] >= 5 and ig["recency_ratio"] >= 0.6
     fresh_in_news = news_age is None or news_age <= 36
+    if (topic.get("breakout") or {}).get("stage") == "settled":
+        before = (previous or {}).get("trend_score") or 0.01
+        return "fading" if previous and topic["scores"]["trend_score"] <= 0.7 * before else "settled"
     if previous:
         before, current = previous["trend_score"] or 0.01, topic["scores"]["trend_score"]
         growing_tag = (topic["hashtag_posts_per_hour"] or 0) >= 5
@@ -857,7 +950,7 @@ def render(report: dict) -> str:
                   "60%+ of the past week's posts, and news no older than 36 h). Run every 3-6 h to get rising/fading.", ""]
     lines += ["Status: **emerging** = new and concentrated in the last 24 h on Instagram; **rising** = trend score up 30%+ "
               "or topic hashtag growing 5+ posts/h since the last run; **sustained** / **fading** = flat / down 30%+; "
-              "**new** = first seen this run without a 24 h concentration.", "",
+              "**new** = first seen this run without a 24 h concentration; **settled** = its posts have gone quiet, so it is no longer a live trend.", "",
               "Stage (from the topic's own posts): **pre breakout** = posts under 12 h over-performing their accounts, "
               "1-2 accounts, no press; **breaking out** = 3+ accounts posted in the last 6 h; **peak** = 8+ accounts or "
               "3+ news publishers; **saturated** = 5+ publishers; **settled** = no new post in 24 h; **simmering** = "
@@ -892,6 +985,13 @@ def render(report: dict) -> str:
         breakout = topic.get("breakout") or {}
         if breakout.get("reasons") and breakout.get("stage") in ("pre_breakout", "breaking_out"):
             out.append(f"\n*Breakout signals (score {breakout['score']}):* " + "; ".join(breakout["reasons"]) + ".")
+        stage_log = topic.get("stage_history") or {}
+        if stage_log.get("runs_observed", 0) > 1 or stage_log.get("transitions"):
+            steps = [f"{t['from'].replace('_', ' ')} to {t['to'].replace('_', ' ')} at {t['at'][:16].replace('T', ' ')} UTC"
+                     for t in stage_log.get("transitions", [])]
+            current = (stage_log.get("stage") or "unknown").replace("_", " ")
+            out.append(f"\n*Stage history:* {'; '.join(steps) or 'no stage change'}; in {current} for "
+                       f"{stage_log.get('stage_hours')} h across {stage_log.get('runs_observed')} observations.")
         if measured:
             tones = measured["tone"]
             # Visual ASCII sentiment breakdown bar
@@ -903,7 +1003,10 @@ def render(report: dict) -> str:
                      "·" * round((tones.get("neutral", 0) / tot) * w))[:w]
             if len(s_bar) < w:
                 s_bar += "·" * (w - len(s_bar))
-            out.append(f"\n*Opinion in comments ({measured['comments']} sampled comments, like-weighted"
+            coverage = ig.get("comment_coverage")
+            cover_text = (f"; {coverage:.0%} of {ig['comments_platform']:,} posted comments fetched"
+                          if coverage is not None else "")
+            out.append(f"\n*Opinion in comments ({measured['comments']} comments labelled{cover_text}, like-weighted"
                        + (f", {measured['sarcastic']} sarcastic" if measured["sarcastic"] else "")
                        + f", labelled by {measured.get('source', 'the LLM brief')}):* "
                        + ", ".join(f"{k} {round(v * 100)}%" for k, v in measured["tone"].items())
@@ -932,6 +1035,19 @@ def render(report: dict) -> str:
                         share = side.get("share")
                         out.append(f"- ~{round(float(share) * 100)}% (estimate) " if isinstance(share, (int, float)) else "- ")
                         out[-1] += side["position"] + (f' - e.g. "{side["example"]}"' if side.get("example") else "")
+        lead = topic.get("lead") or {}
+        pickup_note = (f"; third outlet picked it up {lead['lead_vs_pickup_hours']} h after the first post"
+                       if lead.get("lead_vs_pickup_hours") is not None else "")
+        timing = {"instagram_first": f"Instagram first, {lead.get('lead_vs_news_hours')} h before the earliest news item{pickup_note}",
+                  "news_first": f"news first, {abs(lead.get('lead_vs_news_hours') or 0)} h before the first Instagram post",
+                  "simultaneous": "news and Instagram within an hour of each other",
+                  "instagram_only": "Instagram only; no news item in the 48 h window"}.get(lead.get("verdict"))
+        if timing:
+            out.append(f"\n*Timing:* {timing}.")
+        bot = topic.get("astroturf")
+        if bot:
+            out.append(f"\n*Bot check:* {bot['verdict_summary']} Astroturf index {bot['astroturf_index']}/100 over "
+                       f"{bot['total_comments_audited']} comments.")
         if brief_.get("caution"):
             out.append(f"\n> Caution: {brief_['caution']}")
         panel = (f"; Instagram panel: {ig['panel_accounts']} accounts, top post {ig['panel_max_over']}x its account's usual "
@@ -1016,6 +1132,20 @@ def render(report: dict) -> str:
                          f"{sup}% | {crit}% | {hum}% | {neut}% | `[{bar}]` | {d_desc} |")
         lines += ["", "*Legend: `█` Supportive | `░` Critical | `▒` Humorous / Sarcastic | `·` Neutral*", ""]
 
+    graph = report.get("account_graph") or {}
+    if graph.get("accounts"):
+        lines += ["## Accounts active across topics (possible amplifiers)", "",
+                  f"{graph['cross_topic_accounts']} accounts posted or commented in 2+ measured topics. Coordination "
+                  "candidates share 3+ topics with at least 80% overlap of their topic sets.", "",
+                  "| Account | Topics | Posts | Comments | Topic titles |", "| --- | ---: | ---: | ---: | --- |"]
+        for row in graph["accounts"][:15]:
+            titles = " / ".join(title.replace("|", "/")[:50] for title in row["topics"][:3])
+            lines.append(f"| {row['label']} | {row['topic_count']} | {row['posts']} | {row['comments']} | {titles} |")
+        if graph.get("coordination_pairs"):
+            lines += ["", "Coordination candidates:", ""]
+            lines += [f"- {p['accounts'][0]} and {p['accounts'][1]} share {p['shared_topics']} topics (Jaccard {p['jaccard']})"
+                      for p in graph["coordination_pairs"][:10]]
+        lines.append("")
     unprobed = [t for t in report["topics"] if not t.get("brief")]
     if report.get("panel_pulse"):
         lines += ["## Panel pulse: posts drawing unusual attention for their account", "",
@@ -1040,7 +1170,9 @@ def render(report: dict) -> str:
                   f"summary faithful to evidence {q['faithful_rate']:.0%}, pass {q['pass_rate']:.0%}. "
                   "Topics failing coherence or India relevance are listed under 'Flagged by audit', not in the main sections."]
     lines += ["", "Method and caveats: Instagram counts come from keyword-search samples, not a census; 'emerging' is relative to "
-              "this system's observations. Summaries are LLM-generated from the listed posts/comments and are not fact checks."]
+              "this system's observations. Summaries are LLM-generated from the listed posts/comments and are not fact checks. "
+              "Timing compares the first sampled Instagram post with the earliest news item in the 48 h window: the sample "
+              "can understate Instagram's lead, and the window can cap the news start. Bot checks are heuristic and indicative only."]
     return "\n".join(lines) + "\n"
 
 
@@ -1321,12 +1453,18 @@ def run_collect(args, run_dir: Path) -> dict:
     transport = None if args.no_instagram else make_transport(args.instagram, args.request_budget)
     if transport:
         panel = load_panel(args.panel)
-        bundle = asyncio.run(collect_instagram(plan, transport, parse_time(transport.captured_at), panel, terms,
-                                              comment_posts=getattr(args, "comment_posts", 8),
-                                              panel_total_budget=getattr(args, "panel_total_budget", 800),
-                                              deep_comment_pages=getattr(args, "comment_pages", 4),
-                                              deep_reply_threads=getattr(args, "reply_threads", 6)))
-        transport.close(run_dir / "instagram_capture.json")
+        try:
+            bundle = asyncio.run(collect_instagram(plan, transport, parse_time(transport.captured_at), panel, terms,
+                                                  comment_posts=getattr(args, "comment_posts", 8),
+                                                  panel_total_budget=getattr(args, "panel_total_budget", 800),
+                                                  deep_comment_pages=getattr(args, "comment_pages", 4),
+                                                  deep_reply_threads=getattr(args, "reply_threads", 6),
+                                                  score_topics=getattr(args, "score_topics", 5),
+                                                  score_posts=getattr(args, "score_posts", 8),
+                                                  score_comment_pages=getattr(args, "score_comment_pages", 10)))
+        finally:
+            # Persist the request cache even when the run is interrupted, so paid responses are not lost.
+            transport.close(run_dir / "instagram_capture.json")
         from identify_what_matters.account_discovery import record_run_observations, write_proposals as write_account_proposals
         record_run_observations(bundle, panel, run_dir.name)
         write_account_proposals()
@@ -1455,7 +1593,6 @@ def run_measure(args, run_dir: Path, llm) -> dict:
         step(f"history matched; LLM {llm.usage()}")
     from identify_what_matters.proactive_radar import breakout_assessment
     for topic in all_topics:
-        topic["status"] = status(topic, reference)
         topic["breakout"] = breakout_assessment(topic, reference)
         if metrics_only and not topic.get("instagram", {}).get("media"):
             topic["breakout"] = {
@@ -1465,6 +1602,16 @@ def run_measure(args, run_dir: Path, llm) -> dict:
                 "signals": {},
             }
         topic["trajectory"] = topic["breakout"]["stage"]
+        topic["status"] = status(topic, reference)
+        topic["stage_history"] = stage_history(topic.pop("timeline", []), topic["trajectory"], reference)
+        topic["lead"] = lead_lag(topic)
+    from identify_what_matters.account_graph import astroturf_summary, build_account_graph
+    for topic in all_topics:
+        if topic.get("brief"):
+            try:
+                topic["astroturf"] = astroturf_summary(topic)
+            except Exception as error:
+                print(f"[measure] bot check skipped for '{topic['title'][:40]}': {type(error).__name__}: {str(error)[:120]}", flush=True)
     reddit_path = Path(args.output_root) / "reddit_signals.json"
     reddit_posts = json.loads(reddit_path.read_text(encoding="utf-8")) if reddit_path.exists() else []
     for topic in all_topics:
@@ -1490,6 +1637,8 @@ def run_measure(args, run_dir: Path, llm) -> dict:
         "history_runs": history_runs, "llm": llm.usage(), "quality": quality,
         "analysis_mode": "instagram_metrics_only" if metrics_only else "full_llm_analysis",
         "panel_pulse": panel_pulse(bundle, reference, baselines=history.load_baselines()),
+        "account_graph": build_account_graph([t for t in all_topics if t.get("brief")]),
+        "lead_lag": lead_lag_summary(all_topics),
         "topics": [{k: v for k, v in t.items() if not k.startswith("_") and k != "instagram"} for t in all_topics],
     }
     if not metrics_only:
@@ -1642,6 +1791,9 @@ def main() -> None:
     parser.add_argument("--comment-posts", type=int, default=8, help="Top posts per probed topic to sample deep comments from")
     parser.add_argument("--comment-pages", type=int, default=4, help="Comment pages fetched per deep-sampled post")
     parser.add_argument("--reply-threads", type=int, default=6, help="Reply threads expanded per deep-sampled post")
+    parser.add_argument("--score-topics", type=int, default=5, help="Top-volume topics whose posts get full comment depth")
+    parser.add_argument("--score-posts", type=int, default=8, help="Posts per scored topic to fetch comments for")
+    parser.add_argument("--score-comment-pages", type=int, default=10, help="Comment pages per post for scored topics")
     parser.add_argument("--comments-per-post", type=int, default=25, help="Max ranked comments per post to include in pool")
     parser.add_argument("--comment-pool-size", type=int, default=120, help="Max total comments per topic brief pool")
     parser.add_argument("--llm-max-calls", type=int, default=400)
