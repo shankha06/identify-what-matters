@@ -209,7 +209,9 @@ async def collect_instagram(plan: dict, transport, reference, panel: dict, terms
                            panel_comment_posts: int = 100, term_comment_posts: int = 25, seed_hashtags: int = 25,
                            baselines: dict[str, dict] | None = None, early_comment_posts: int = 40,
                            comment_posts: int = 3, panel_total_budget: int = 800,
-                           deep_comment_pages: int = 4, deep_reply_threads: int = 6) -> dict:
+                           deep_comment_pages: int = 4, deep_reply_threads: int = 6,
+                           score_topics: int = 5, score_posts: int = 8, score_comment_pages: int = 10,
+                           score_max_comments: int = 300) -> dict:
     """Every Instagram request of a run, in priority order (budget may end the run early). No LLM calls."""
     bundle = {"feeds": {}, "missing_accounts": [], "terms": {}, "probes": {}, "seeds": {}, "comments": {},
               "stopped": None}
@@ -374,23 +376,36 @@ async def collect_instagram(plan: dict, transport, reference, panel: dict, terms
 
     await asyncio.gather(*[_do_term_comment(item) for item in term_comment_targets], return_exceptions=True)
 
-    deep_targets = []
-    for topic in probe_topics:
-        media = (bundle["probes"].get(topic["topic_key"]) or {}).get("media", [])
-        commentable = [m for m in media if (m.get("comment_count") or 0) > 0]
-        ranked = sorted(commentable, key=lambda m: m["comment_count"], reverse=True)[:comment_posts]
-        deep_targets += [m for m in ranked if not m.get("comments")]
+    def _probe_media(topic: dict) -> list[dict]:
+        return (bundle["probes"].get(topic["topic_key"]) or {}).get("media", [])
 
-    async def _do_deep_comment(media):
-        sampled = await call(transport.comments, media["id"], _timeout=150,
-                             max_pages=deep_comment_pages, max_reply_threads=deep_reply_threads)
+    # Topics with the most comment volume are scored at full depth; the rest get the standard sample.
+    volume = {t["topic_key"]: sum(m.get("comment_count") or 0 for m in _probe_media(t)) for t in probe_topics}
+    scored_keys = set(sorted(volume, key=volume.get, reverse=True)[:score_topics])
+    deep_plan: dict[str, tuple] = {}
+    for topic in probe_topics:
+        commentable = sorted((m for m in _probe_media(topic) if (m.get("comment_count") or 0) > 0),
+                             key=lambda m: m["comment_count"], reverse=True)
+        if topic["topic_key"] in scored_keys:
+            for m in commentable[:score_posts]:
+                deep_plan[m["code"]] = (m, score_comment_pages, score_max_comments)
+        else:
+            for m in commentable[:comment_posts]:
+                if not m.get("comments"):
+                    deep_plan.setdefault(m["code"], (m, deep_comment_pages, 100))
+    deep_targets = list(deep_plan.values())
+
+    async def _do_deep_comment(media, pages: int, cap: int):
+        sampled = await call(transport.comments, media["id"], _timeout=150, max_pages=pages,
+                             max_comments=cap, max_reply_threads=deep_reply_threads)
         if sampled:
             bundle["comments"][media["code"]] = sampled
             media["comments"] = sampled["comments"]
 
-    print(f"[collect] deep comments: {len(deep_targets)} posts across {len(probe_topics)} topics", flush=True)
+    print(f"[collect] deep comments: {len(deep_targets)} posts; full-depth scoring on {len(scored_keys)} topics", flush=True)
     for start in range(0, len(deep_targets), 10):
-        await asyncio.gather(*[_do_deep_comment(m) for m in deep_targets[start:start + 10]], return_exceptions=True)
+        await asyncio.gather(*[_do_deep_comment(m, pages, cap) for m, pages, cap in deep_targets[start:start + 10]],
+                             return_exceptions=True)
     for media in _all_media(bundle):
         sampled = bundle["comments"].get(media["code"])
         if sampled and not media.get("comments"):
