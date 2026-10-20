@@ -29,3 +29,6 @@ dist/
 /artifacts/*
 /artifacts/demographics_models/
 *.log
+
+# macOS AppleDouble metadata files
+._*
