@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Discover trending, emerging, and debated topics in India from social and public signals."
 readme = "README.md"
 authors = [
-    { name = "Shankhadeep Roy", email = "shankhadeep.roy@walmart.com" }
+    { name = "Shankhadeep Roy", email = "shankharay.917@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
@@ -31,11 +31,6 @@ train = [
 requires = ["uv_build>=0.12.9,<0.13.0"]
 build-backend = "uv_build"
 
-
-[[tool.uv.index]]
-url = "https://pypi.ci.artifacts.walmart.com/artifactory/api/pypi/external-pypi/simple"
-default = true
-
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
-default = false
+default = true

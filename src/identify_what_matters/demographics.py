@@ -17,8 +17,13 @@ from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from functools import lru_cache
+
 import joblib
+import numpy as np
 import torch
+
+_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------- LOAD TRAINED CLASSIFIERS ----
 MODELS_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "demographics_models"
@@ -59,31 +64,43 @@ def _get_neural_demographics_model():
             model.mental_head.load_state_dict(ckpt["mental_head"])
             model.age_head.load_state_dict(ckpt["age_head"])
             model.eval()
+            model.to(_DEVICE)
             _NEURAL_DEMO_MODEL = model
             _NEURAL_DEMO_CONFIG = ckpt.get("config", {})
         except Exception:
             _NEURAL_DEMO_MODEL = None
     return _NEURAL_DEMO_TOKENIZER, _NEURAL_DEMO_MODEL, _NEURAL_DEMO_CONFIG
 
+@lru_cache(maxsize=65536)
+def _neural_demo_probs(text: str):
+    """Cached (mental, age) softmax vectors for one text. One forward pass per unique text."""
+    tok, mod, _ = _get_neural_demographics_model()
+    if tok is None or mod is None or not text.strip():
+        return None
+    enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+    device = next(mod.parameters()).device
+    with torch.no_grad():
+        m_logits, a_logits, _, _ = mod(enc["input_ids"].to(device), enc["attention_mask"].to(device))
+        m_probs = torch.softmax(m_logits, dim=-1)[0].cpu().numpy()
+        a_probs = torch.softmax(a_logits, dim=-1)[0].cpu().numpy()
+    return m_probs, a_probs
+
+
 def predict_demographics_neural(text: str) -> tuple[tuple[str, float] | None, tuple[str, float] | None]:
     """Predict mental state and age bracket using fine-tuned contrastive DeBERTa model."""
-    tok, mod, cfg = _get_neural_demographics_model()
-    if tok is None or mod is None or not text.strip():
-        return None, None
     try:
         from train_contrastive_demographics_vm import ID2MENTAL, ID2AGE
-        enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-        with torch.no_grad():
-            m_logits, a_logits, _, _ = mod(enc["input_ids"], enc["attention_mask"])
-            m_probs = torch.softmax(m_logits, dim=-1)[0]
-            a_probs = torch.softmax(a_logits, dim=-1)[0]
-
-            m_idx = torch.argmax(m_probs).item()
-            a_idx = torch.argmax(a_probs).item()
-
-            mental_res = (ID2MENTAL[m_idx], round(float(m_probs[m_idx].item()), 3))
-            age_res = (ID2AGE[a_idx], round(float(a_probs[a_idx].item()), 3))
-            return mental_res, age_res
+        probs = _neural_demo_probs(text)
+        if probs is None:
+            return None, None
+        m_probs, a_probs = probs
+        m_idx = int(np.argmax(m_probs))
+        a_idx = int(np.argmax(a_probs))
+        mental_res = (ID2MENTAL[m_idx], round(float(m_probs[m_idx]), 3))
+        age_res = (ID2AGE[a_idx], round(float(a_probs[a_idx]), 3))
+        return mental_res, age_res
+    except Exception:
+        return None, None
     except Exception:
         return None, None
 
@@ -96,10 +113,12 @@ def _get_bert_party_model():
             _BERT_PARTY_TOKENIZER = AutoTokenizer.from_pretrained(BERT_PARTY_DIR)
             _BERT_PARTY_MODEL = AutoModelForSequenceClassification.from_pretrained(BERT_PARTY_DIR)
             _BERT_PARTY_MODEL.eval()
+            _BERT_PARTY_MODEL.to(_DEVICE)
         except Exception:
             _BERT_PARTY_MODEL = None
     return _BERT_PARTY_TOKENIZER, _BERT_PARTY_MODEL
 
+@lru_cache(maxsize=65536)
 def predict_party_neural(text: str) -> tuple[str, float] | None:
     """Predict political party leaning using fine-tuned neural transformer."""
     tok, mod = _get_bert_party_model()
@@ -111,6 +130,7 @@ def predict_party_neural(text: str) -> tuple[str, float] | None:
         else:
             idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
         enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        enc = {k: v.to(next(mod.parameters()).device) for k, v in enc.items()}
         with torch.no_grad():
             logits = mod(**enc).logits
             probs = torch.softmax(logits, dim=-1)[0]
@@ -484,12 +504,7 @@ def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
         # If linear mental state classifier exists, evaluate calibrated ensemble (0.65 Neural + 0.35 Linear)
         if state_m is not None and hasattr(state_m, "predict_proba"):
             try:
-                import numpy as np
-                tok, mod, _ = _get_neural_demographics_model()
-                enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-                with torch.no_grad():
-                    m_logits, _, _, _ = mod(enc["input_ids"], enc["attention_mask"])
-                    neural_probs = torch.softmax(m_logits, dim=-1)[0].numpy()
+                neural_probs = _neural_demo_probs(text)[0]
                 from train_contrastive_demographics_vm import MENTAL_CLASSES, ID2MENTAL
                 lin_probs = state_m.predict_proba([text])[0]
                 lin_classes = list(state_m.classes_)
@@ -525,11 +540,7 @@ def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
                     prior[AGE_CLASSES.index('35-54')] += 0.20
 
                 if neural_age:
-                    tok, mod, _ = _get_neural_demographics_model()
-                    enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
-                    with torch.no_grad():
-                        _, a_logits, _, _ = mod(enc["input_ids"], enc["attention_mask"])
-                        neural_a_probs = torch.softmax(a_logits, dim=-1)[0].numpy()
+                    neural_a_probs = _neural_demo_probs(text)[1]
                     ens_a = 0.65 * lin_reordered + 0.25 * neural_a_probs + 0.35 * prior
                 else:
                     ens_a = lin_reordered + 0.35 * prior

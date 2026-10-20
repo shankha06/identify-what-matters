@@ -27,6 +27,8 @@ with contextlib.suppress(ImportError):
 HELPER_DIR = Path(os.environ.get("LLM_HELPER_DIR", "/Users/s0r0qw6/model-py-java"))
 DEFAULT_GATEWAY_MODEL = os.environ.get("TRENDS_LLM_MODEL", "claude-sonnet-4-6")
 DEFAULT_GATEWAY_VERSION = os.environ.get("TRENDS_LLM_MODEL_VERSION", "default")
+OPENROUTER_WORKERS = 100
+GATEWAY_WORKERS = 6
 
 
 @dataclass
@@ -77,7 +79,7 @@ def make_backend_client(model: str | None = None, temperature: float = 0.1,
                         max_tokens: int = 8192) -> Any:
     """Creates the best available LLM client.
 
-    Prefers internal Walmart Element Gateway (Claude Sonnet 4.6).
+    Prefers internal Gateway (Claude Sonnet 4.6).
     Falls back to OpenRouterClient if Gateway credentials/helper are unavailable.
     """
     use_gateway = os.environ.get("LLM_BACKEND", "gateway").lower() != "openrouter"
@@ -135,8 +137,11 @@ class LLM:
                 last_error = error
         raise ValueError(f"LLM returned unusable JSON: {last_error}")
 
-    def map(self, function: Callable[[Any], Any], items: list, workers: int = 6) -> list:
+    def map(self, function: Callable[[Any], Any], items: list, workers: int | None = None) -> list:
         """Run function over items in a thread pool; failures become None, never abort the run."""
+        if workers is None:
+            workers = OPENROUTER_WORKERS if isinstance(self.client, OpenRouterClient) else GATEWAY_WORKERS
+
         def safe(item):
             try:
                 return function(item)

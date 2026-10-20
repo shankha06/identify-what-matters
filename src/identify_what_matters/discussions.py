@@ -23,7 +23,7 @@ from pathlib import Path
 from statistics import median
 
 from identify_what_matters import encoder
-from identify_what_matters.instagram_access import scrub
+from identify_what_matters.instagram_access import HIKER_CONCURRENCY, scrub
 from identify_what_matters.trends import CATEGORIES, POLITICS_HASHTAGS, SEED_HASHTAGS, SYSTEM, hours_since, probe
 
 PANEL_PATH = Path(__file__).resolve().parents[2] / "config" / "panel.json"
@@ -216,7 +216,7 @@ async def collect_instagram(plan: dict, transport, reference, panel: dict, terms
     bundle = {"feeds": {}, "missing_accounts": [], "terms": {}, "probes": {}, "seeds": {}, "comments": {},
               "stopped": None}
 
-    _ig_slots = asyncio.Semaphore(10)
+    _ig_slots = asyncio.Semaphore(HIKER_CONCURRENCY)
 
     async def call(method, *args, _timeout: int = 45, **kwargs):
         if bundle["stopped"]:

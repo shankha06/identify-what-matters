@@ -221,7 +221,7 @@ A critical audit of the dashboard and classification pipelines revealed that whi
 ### Work Accomplished
 
 1. **Targeted Corpus Generation & Class Rebalancing**
-   - Built [scripts/balance_political_corpus.py](scripts/balance_political_corpus.py) driven by Walmart Element Gateway Claude Sonnet 4.6 (`claude-sonnet-4-6@default`).
+   - Built [scripts/balance_political_corpus.py](scripts/balance_political_corpus.py) driven by  Claude Sonnet 4.6 (`claude-sonnet-4-6@default`).
    - Generated 20 targeted batches (364 high-signal validated samples) addressing extreme minority classes.
    - Raised `fact_check` from 22 to 113 samples (+413%), `corruption_allegation` from 41 to 73 samples (+78%), and regional party representations across all target labels.
    - Rebuilt corpus splits to 4,452 total labelled items (3,197 train, 555 dev, 700 held-out test).
