@@ -1,13 +1,8 @@
-"""Instagram access for topic measurement: account feeds, keyword search, hashtags, comments.
-
-Interchangeable transports return the same raw v1 media/comment dicts and record a capture:
-  * InstagrapiTransport - private API via instagrapi (with INSTAGRAM_SESSION_ID).
-  * BrowserTransport    - a logged-in browser tab driven over a localhost WebSocket (browser_proxy.js).
-  * ReplayTransport     - replays a capture written by either of the above (no network).
-"""
+"""Hiker collection and saved-capture replay for Instagram topic measurement."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -15,14 +10,57 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
 from dotenv import load_dotenv
 
 HANDLE = re.compile(r"@[\w.]+")
 URL = re.compile(r"https?://\S+|www\.\S+")
 PHONE = re.compile(r"(?<!\w)\+?\d[\d\s-]{8,}\d(?!\w)")
+UNAVAILABLE_ACCOUNT_ERRORS = {"PrivateAccount", "UserNotFound", "NotFoundError"}
 
-load_dotenv() 
+load_dotenv()
+
+
+class BudgetExhausted(RuntimeError):
+    pass
+
+
+PROFILE_FIELDS = ("biography", "follower_count", "following_count", "media_count", "is_verified", "is_private",
+                  "is_business", "category", "city_name")
+PROFILE_TTL_SECONDS = 30 * 24 * 3600
+TOTALS_CACHE_PATH = Path("output/panel_comment_totals.json")
+REQUEST_CACHE_PATH = Path("output/instagram_request_cache.json")
+SEARCH_TTL_SECONDS = 6 * 3600
+HASHTAG_TTL_SECONDS = 6 * 3600
+THREAD_TTL_SECONDS = 12 * 3600
+# The request cache holds full raw responses (>100 MB); rewriting it on every call stalls the event loop.
+REQUEST_CACHE_FLUSH_SECONDS = 60
+
+
+def _is_fresh(entry: dict | None, ttl_seconds: float) -> bool:
+    return bool(entry) and (datetime.now(timezone.utc) - datetime.fromisoformat(entry["fetched_at"])).total_seconds() < ttl_seconds
+
+
+def totals_due(entry: dict, now: datetime) -> bool:
+    age_hours = (now - datetime.fromisoformat(entry["taken_at"])).total_seconds() / 3600
+    interval = 6 if age_hours < 24 else 24 if age_hours < 72 else None
+    if interval is None:
+        return False
+    return (now - datetime.fromisoformat(entry["fetched_at"])).total_seconds() / 3600 >= interval
+
+
+def normalize_profile(raw: dict) -> dict:
+    profile = {key: raw.get(key) for key in PROFILE_FIELDS}
+    profile["biography"] = scrub(profile["biography"])
+    return profile
+
+
+class HikerAPIError(RuntimeError):
+    """Hiker returns HTTP 200 with {"detail", "exc_type"} for failed requests; this surfaces them as exceptions."""
+
+    def __init__(self, exc_type: str, detail: str):
+        super().__init__(f"{exc_type}: {detail[:160]}")
+        self.exc_type = exc_type
+
 
 def scrub(text: str | None) -> str:
     """Remove handles, links and phone numbers before text leaves the machine."""
@@ -48,15 +86,35 @@ def walk_media(payload) -> list[dict]:
     return found
 
 
-def normalize_media(raw: dict, query: str) -> dict:
-    caption = raw.get("caption") or {}
-    user = raw.get("user") or {}
+def _parse_taken_at(raw: dict) -> str | None:
     taken = raw.get("taken_at")
+    if isinstance(taken, (int, float)):
+        return datetime.fromtimestamp(taken, timezone.utc).isoformat()
+    if isinstance(taken, str) and taken:
+        try:
+            return datetime.fromisoformat(taken.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+    taken_ts = raw.get("taken_at_ts")
+    if isinstance(taken_ts, (int, float)):
+        return datetime.fromtimestamp(taken_ts, timezone.utc).isoformat()
+    return None
+
+
+def normalize_media(raw: dict, query: str) -> dict:
+    caption = raw.get("caption")
+    if isinstance(caption, dict):
+        caption_text = caption.get("text", "")
+    elif isinstance(caption, str):
+        caption_text = caption
+    else:
+        caption_text = raw.get("caption_text") or ""
+    user = raw.get("user") or {}
     return {
         "id": str(raw.get("pk") or raw.get("id", "")).split("_")[0], "code": raw.get("code"),
         "url": f"https://www.instagram.com/p/{raw.get('code')}/",
-        "taken_at": datetime.fromtimestamp(taken, timezone.utc).isoformat() if isinstance(taken, (int, float)) else None,
-        "caption": caption.get("text", "") if isinstance(caption, dict) else str(caption or ""),
+        "taken_at": _parse_taken_at(raw),
+        "caption": caption_text,
         "author_id": str(user.get("pk") or user.get("id") or user.get("username") or ""),
         "author": user.get("username"), "author_verified": bool(user.get("is_verified")),
         "like_count": raw.get("like_count"), "comment_count": raw.get("comment_count"),
@@ -70,146 +128,316 @@ def normalize_media(raw: dict, query: str) -> dict:
 def normalize_comment(raw: dict) -> dict:
     created = raw.get("created_at_utc") or raw.get("created_at")
     user = raw.get("user") or {}
+    reply_count = raw.get("child_comment_count")
+    if reply_count is None:
+        reply_count = len(raw.get("preview_child_comments") or [])
     return {"id": str(raw.get("pk") or raw.get("id")), "text": raw.get("text", ""),
             "created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if isinstance(created, (int, float)) else None,
-            "like_count": raw.get("comment_like_count"), "reply_count": raw.get("child_comment_count") or 0,
-            "author_id": str(user.get("pk") or user.get("id") or "")}
+            "like_count": raw.get("comment_like_count"), "reply_count": reply_count,
+            "author_id": str(user.get("pk") or user.get("id") or raw.get("user_id") or ""),
+            "author": user.get("username") or raw.get("username") or "", "parent_id": None}
 
 
-class InstagrapiTransport:
-    """Bounded, fail-closed private-API transport; stops on the first block or challenge."""
+class HikerTransport:
+    """Async transport via the Hiker API (https://api.hikerapi.com/docs).
 
-    def __init__(self, request_budget: int = 150, delay_seconds: float = 6.0, settings_file: str | None = None,
-                 user_id_cache: str | Path = "output/panel_user_ids.json"):
-        from identify_what_matters.instagrapi_client import _FailClosedClient, _secure_settings
-        session = os.environ.get("INSTAGRAM_SESSION_ID")
-        settings = _secure_settings(Path(settings_file)) if settings_file else {}
-        session = session or settings.get("authorization_data", {}).get("sessionid")
-        if not session:
-            raise RuntimeError("Set INSTAGRAM_SESSION_ID in environment or .env.")
-        self.budget, self.delay, self.used = request_budget, delay_seconds, 0
+    Uses AsyncClient for proper asyncio.wait_for timeouts. All methods are coroutines;
+    shared state is protected by asyncio.Lock. Call from within an event loop.
+    """
+
+    def __init__(self, request_budget: int = 999_999, delay_seconds: float = 1.0, token: str | None = None,
+                 user_id_cache: str | Path = "output/panel_user_ids.json",
+                 feed_cache: str | Path = "output/panel_feed_cache.json",
+                 feed_ttl_hours: float = 6.0):
+        from hikerapi import AsyncClient
+        token = token or os.environ.get("HIKERAPI_TOKEN")
+        if not token:
+            raise RuntimeError("Set HIKERAPI_TOKEN in environment/.env.")
+        self.delay = delay_seconds
+        self.request_budget = request_budget
+        self.used = 0
+        self._lock = asyncio.Lock()
+        self._slots = asyncio.Semaphore(10)
         self.captured_at = datetime.now(timezone.utc).isoformat()
         self.capture = {"captured_at": self.captured_at, "searches": {}, "comments": {}, "hashtags": {},
-                        "feeds": {}, "errors": []}
+                        "feeds": {}, "profiles": {}, "totals": {}, "errors": []}
+        self.totals_cache: dict = json.loads(TOTALS_CACHE_PATH.read_text()) if TOTALS_CACHE_PATH.exists() else {}
+        self.request_cache: dict = json.loads(REQUEST_CACHE_PATH.read_text()) if REQUEST_CACHE_PATH.exists() else {}
+        for section in ("searches", "hashtags", "threads"):
+            self.request_cache.setdefault(section, {})
+        self._cache_dirty = False
+        self._cache_flushed_at = time.monotonic()
+        self.profile_cache_path = Path("output/commenter_profiles.json")
+        self.profile_cache: dict = json.loads(self.profile_cache_path.read_text()) if self.profile_cache_path.exists() else {}
         self.id_cache_path = Path(user_id_cache)
         self.user_ids = json.loads(self.id_cache_path.read_text()) if self.id_cache_path.exists() else {}
-        self.client = _FailClosedClient(settings, self._before)
-        if self.client.login_by_sessionid(unquote(session)) is not True:
-            raise RuntimeError("Instagram session login failed")
+        self.feed_cache_path = Path(feed_cache)
+        self.feed_cache: dict = json.loads(self.feed_cache_path.read_text()) if self.feed_cache_path.exists() else {}
+        self.feed_ttl = feed_ttl_hours * 3600
+        self.client = AsyncClient(token=token)
 
-    def _before(self):
-        if self.used >= self.budget:
-            raise RuntimeError("Instagram request budget exhausted")
-        if self.used:
-            time.sleep(self.delay)
-        self.used += 1
+    async def _before(self):
+        """Rate-limit + budget guard. Each coroutine sleeps independently; lock guards the counter."""
+        async with self._lock:
+            if self.used >= self.request_budget:
+                raise BudgetExhausted(f"budget exhausted: {self.used}/{self.request_budget} requests used")
+            do_sleep = self.used > 0
+            self.used += 1
+        if do_sleep:
+            jitter = random.uniform(-0.2, 0.2)
+            await asyncio.sleep(max(0.1, self.delay + jitter))
 
-    def search(self, query: str) -> list[dict]:
-        raw = self.client.fbsearch_topsearch_v2(query)
-        self.capture["searches"][query] = raw
+    async def _api(self, method: str, *args, **kwargs):
+        async with self._slots:
+            raw = await getattr(self.client, method)(*args, **kwargs)
+        if isinstance(raw, dict) and "exc_type" in raw:
+            raise HikerAPIError(str(raw["exc_type"]), str(raw.get("detail", "")))
+        return raw
+
+    async def _remember(self, section: str, key: str, value: dict) -> None:
+        async with self._lock:
+            self.request_cache[section][key] = {"fetched_at": datetime.now(timezone.utc).isoformat(), **value}
+            self._cache_dirty = True
+            if time.monotonic() - self._cache_flushed_at >= REQUEST_CACHE_FLUSH_SECONDS:
+                self._flush_request_cache()
+
+    def _flush_request_cache(self) -> None:
+        """Atomic write so an interrupted run cannot leave a truncated cache behind."""
+        REQUEST_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = REQUEST_CACHE_PATH.parent / (REQUEST_CACHE_PATH.name + ".tmp")
+        tmp.write_text(json.dumps(self.request_cache, ensure_ascii=False))
+        os.replace(tmp, REQUEST_CACHE_PATH)
+        self._cache_dirty = False
+        self._cache_flushed_at = time.monotonic()
+
+    async def search(self, query: str) -> list[dict]:
+        entry = self.request_cache["searches"].get(query)
+        if _is_fresh(entry, SEARCH_TTL_SECONDS):
+            raw = entry["raw"]
+        else:
+            await self._before()
+            raw = await self._api("fbsearch_topsearch_v2", query)
+            await self._remember("searches", query, {"raw": raw})
+        async with self._lock:
+            self.capture["searches"][query] = raw
         return [normalize_media(m, query) for m in walk_media(raw)]
 
-    def comments(self, media_id: str) -> dict:
-        payload = self.client.private_request(f"media/{media_id}/comments/", params={"can_support_threading": "true"})
-        self.capture["comments"][str(media_id)] = payload
-        return {"comments": [normalize_comment(c) for c in payload.get("comments", [])],
-                "total": payload.get("comment_count")}
+    async def comments(self, media_id: str, max_pages: int = 2, max_comments: int = 100,
+                       max_reply_threads: int = 5) -> dict:
+        key = str(media_id)
+        entry = self.request_cache["threads"].get(key)
+        if _is_fresh(entry, THREAD_TTL_SECONDS) and entry["max_pages"] >= max_pages \
+                and entry["max_reply_threads"] >= max_reply_threads:
+            all_comments, total = entry["comments"], entry["total"]
+        else:
+            all_comments, total = await self._fetch_thread(media_id, max_pages, max_reply_threads)
+            await self._remember("threads", key, {"comments": all_comments, "total": total,
+                                                  "max_pages": max_pages, "max_reply_threads": max_reply_threads})
+        async with self._lock:
+            self.capture["comments"][key] = {"comments": all_comments, "comment_count": total}
+        return {"comments": all_comments, "total": total}
 
-    def hashtag(self, tag: str) -> dict:
-        info = self.client.private_request(f"tags/{tag}/info/")
-        sections = self.client.private_request(f"tags/{tag}/sections/", data={
-            "tab": "recent", "_uuid": self.client.uuid, "include_persistent": "false", "rank_token": self.client.rank_token})
-        raw = {"media_count": info.get("media_count"), "sections": sections}
-        self.capture["hashtags"][tag] = raw
-        return {"media_count": info.get("media_count"),
+    async def _fetch_thread(self, media_id: str, max_pages: int, max_reply_threads: int,
+                            max_comments: int = 100) -> tuple[list, int | None]:
+        all_comments: list[dict] = []
+        page_id = None
+        seen_cursors: set = set()
+        total = None
+
+        for _ in range(max_pages):
+            await self._before()
+            try:
+                raw = await self._api("media_comments_v2", id=media_id, page_id=page_id)
+            except HikerAPIError as error:
+                if error.exc_type == "NotFoundError":
+                    break
+                raise
+            if not isinstance(raw, dict):
+                break
+            payload = raw.get("response", {}) if isinstance(raw, dict) else {}
+            if total is None:
+                total = payload.get("comment_count")
+            for c in payload.get("comments", []):
+                nc = normalize_comment(c)
+                if nc:
+                    all_comments.append(nc)
+            next_page_id = raw.get("next_page_id") or payload.get("next_min_id")
+            if not next_page_id or next_page_id in seen_cursors or len(all_comments) >= max_comments:
+                break
+            seen_cursors.add(next_page_id)
+            page_id = next_page_id
+
+        replied = sorted((c for c in all_comments if c["reply_count"]), key=lambda c: -c["reply_count"])
+        for thread in replied[:max_reply_threads]:
+            await self._before()
+            try:
+                raw = await self._api("media_comments_replies_v2", media_id=media_id, comment_id=thread["id"])
+            except HikerAPIError:
+                continue
+            for child in (raw.get("child_comments") or []) if isinstance(raw, dict) else []:
+                reply = normalize_comment(child)
+                reply["parent_id"] = thread["id"]
+                all_comments.append(reply)
+
+        return all_comments, total
+
+    async def hashtag(self, tag: str) -> dict:
+        entry = self.request_cache["hashtags"].get(tag)
+        if _is_fresh(entry, HASHTAG_TTL_SECONDS):
+            media_count, sections = entry["media_count"], entry["sections"]
+        else:
+            await self._before()
+            info = await self._api("hashtag_by_name_v1", tag)
+            await self._before()
+            recent = await self._api("hashtag_medias_recent_v2", name=tag)
+            sections = recent.get("response", {}).get("sections", []) if isinstance(recent, dict) else []
+            media_count = info.get("media_count")
+            await self._remember("hashtags", tag, {"media_count": media_count, "sections": sections})
+        raw = {"media_count": media_count, "sections": sections}
+        async with self._lock:
+            self.capture["hashtags"][tag] = raw
+        return {"media_count": media_count,
                 "media": [normalize_media(m, "#" + tag) for m in walk_media(sections)]}
 
-    def user_feed(self, username: str, doc_id: str | None = None) -> list[dict]:
-        if username not in self.user_ids:
-            self.user_ids[username] = str(self.client.private_request(f"users/{username}/usernameinfo/")["user"]["pk"])
-            self.id_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.id_cache_path.write_text(json.dumps(self.user_ids, indent=1))
-        items = self.client.private_request(f"feed/user/{self.user_ids[username]}/", params={"count": 12}).get("items", [])
-        self.capture["feeds"][username] = {"items": items}
-        return [normalize_media(m, "@" + username) for m in items]
+    async def user_feed(self, username: str, doc_id: str | None = None) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        _max_post_age = 168 * 3600  # keep posts up to 7 days (168h) across runs for multi-day debate tracking
+        _stale_fallback = 48 * 3600  # return stale cache if live fetch fails and cache is < 48h old
 
-    def close(self, path: Path) -> None:
-        path.write_text(json.dumps(self.capture, ensure_ascii=False))
+        # Serve from cache if fresh enough (within TTL); unavailable accounts are re-checked weekly
+        cached = self.feed_cache.get(username)
+        if cached:
+            age = (now - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+            ttl = self.feed_ttl * 28 if cached.get("unavailable") else self.feed_ttl
+            if age < ttl:
+                items = cached["items"]
+                self.capture["feeds"][username] = {"items": items}
+                return [normalize_media(m, "@" + username) for m in items]
 
-
-class BrowserTransport:
-    """Logged-in browser tab as a fetch proxy (see browser_proxy.js); Python paces and budgets requests."""
-
-    def __init__(self, port: int = 8765, request_budget: int = 220, delay_seconds: float = 3.0):
-        from identify_what_matters.bridge import BrowserBridge
-        self.bridge = BrowserBridge(port)
-        self.budget, self.delay, self.used, self.blocked = request_budget, delay_seconds, 0, None
-        self.captured_at = datetime.now(timezone.utc).isoformat()
-        self.capture = {"captured_at": self.captured_at, "searches": {}, "comments": {}, "hashtags": {},
-                        "feeds": {}, "errors": []}
-
-    def _call(self, kind: str, arg: str):
-        if self.blocked:
-            raise RuntimeError(f"Instagram blocked earlier ({self.blocked}); stopping")
-        if self.used >= self.budget:
-            raise RuntimeError("Instagram request budget exhausted")
-        if self.used:
-            time.sleep(self.delay + random.random())
-        self.used += 1
-        status, body = self.bridge.call(kind, arg)
-        if status in (401, 403, 429):
-            self.blocked = status
-            self.capture["errors"].append({"kind": kind, "arg": arg, "status": status, "stopped": True})
-            raise RuntimeError(f"Instagram blocked with HTTP {status}")
-        if status != 200 or body is None:
-            self.capture["errors"].append({"kind": kind, "arg": arg, "status": status})
-            return None
-        return body
-
-    def search(self, query: str) -> list[dict] | None:
-        body = self._call("search", query)
-        if body is None:
+        uid = self.user_ids.get(username)
+        new_items, fetch_error = None, None
+        try:
+            if uid is None:
+                await self._before()
+                result = await self._api("user_by_username_v1", username)
+                uid = str(result["pk"])
+                async with self._lock:
+                    self.user_ids[username] = uid
+                    self.id_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.id_cache_path.write_text(json.dumps(self.user_ids, indent=1))
+            await self._before()
+            new_items, _end_cursor = await self._api("user_medias_chunk_v1", user_id=uid)
+        except BudgetExhausted:
+            raise
+        except HikerAPIError as error:
+            if error.exc_type not in UNAVAILABLE_ACCOUNT_ERRORS:
+                raise
+            async with self._lock:
+                self.feed_cache[username] = {"fetched_at": now.isoformat(), "items": [], "unavailable": error.exc_type}
+                self.feed_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self.feed_cache_path.write_text(json.dumps(self.feed_cache, ensure_ascii=False))
+            self.capture["feeds"][username] = {"items": [], "unavailable": error.exc_type}
             return []
-        self.capture["searches"][query] = body
-        return [normalize_media(m, query) for m in walk_media(body)]
+        except Exception as error:
+            fetch_error = error
 
-    def comments(self, media_id: str) -> dict | None:
-        body = self._call("comments", str(media_id))
-        if body is None:
-            return None
-        self.capture["comments"][str(media_id)] = body
-        return {"comments": [normalize_comment(c) for c in body.get("comments", [])], "total": body.get("comment_count")}
+        if new_items is None:
+            # Live fetch failed — fall back to stale cache if within 48h
+            if cached:
+                age = (now - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+                if age < _stale_fallback:
+                    self.capture["feeds"][username] = {"items": cached["items"]}
+                    return [normalize_media(m, "@" + username) for m in cached["items"]]
+            raise fetch_error
 
-    def hashtag(self, tag: str) -> dict | None:
-        if tag in self.capture["hashtags"]:
-            body = self.capture["hashtags"][tag]
+        # Merge new posts with existing cached posts (additive), dedup by 'code', prune > 72h
+        existing = {m["code"]: m for m in (cached["items"] if cached else []) if m.get("code")}
+        for m in new_items:
+            if m.get("code"):
+                existing[m["code"]] = m
+        # Prune posts older than 72h (taken_at field)
+        merged = []
+        for m in existing.values():
+            ta = m.get("taken_at")
+            if ta:
+                try:
+                    age_s = (now - datetime.fromisoformat(str(ta).replace("Z", "+00:00"))).total_seconds()
+                    if age_s <= _max_post_age:
+                        merged.append(m)
+                    continue
+                except Exception:
+                    pass
+            merged.append(m)
+
+        async with self._lock:
+            self.capture["feeds"][username] = {"items": new_items}
+            self.feed_cache[username] = {"fetched_at": now.isoformat(), "items": merged}
+            self.feed_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.feed_cache_path.write_text(json.dumps(self.feed_cache, ensure_ascii=False))
+
+        return [normalize_media(m, "@" + username) for m in merged]
+
+    async def profile(self, username: str) -> dict | None:
+        cached = self.profile_cache.get(username)
+        if cached and (datetime.now(timezone.utc) - datetime.fromisoformat(cached["fetched_at"])).total_seconds() < PROFILE_TTL_SECONDS:
+            profile = cached["profile"]
         else:
-            body = self._call("hashtag", tag)
-            if body is None:
+            await self._before()
+            try:
+                raw = await self._api("user_by_username_v1", username)
+            except HikerAPIError:
                 return None
-            self.capture["hashtags"][tag] = body
-        return {"media_count": body.get("media_count"),
-                "media": [normalize_media(m, "#" + tag) for m in walk_media(body.get("sections", []))]}
+            profile = normalize_profile(raw)
+            async with self._lock:
+                self.profile_cache[username] = {"fetched_at": datetime.now(timezone.utc).isoformat(), "profile": profile}
+                self.profile_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self.profile_cache_path.write_text(json.dumps(self.profile_cache, ensure_ascii=False))
+        async with self._lock:
+            self.capture["profiles"][username] = profile
+        return profile
 
-    def user_feed(self, username: str, doc_id: str | None = None) -> list[dict] | None:
-        body = self._call("user_feed", {"username": username, "doc_id": doc_id})
-        if body is None:
-            return None
-        self.capture["feeds"][username] = body
-        return [normalize_media(m, "@" + username) for m in body.get("items", [])]
+    async def comment_total(self, media_id: str, taken_at: str) -> int | None:
+        key = str(media_id)
+        now = datetime.now(timezone.utc)
+        cached = self.totals_cache.get(key)
+        if cached and not totals_due(cached, now):
+            total = cached["total"]
+        else:
+            await self._before()
+            try:
+                raw = await self._api("media_comments_v2", id=media_id, page_id=None)
+            except HikerAPIError as error:
+                if error.exc_type != "NotFoundError":
+                    return None
+                total = 0
+            else:
+                total = (raw.get("response") or {}).get("comment_count") if isinstance(raw, dict) else None
+                if total is None:
+                    return None
+            async with self._lock:
+                self.totals_cache[key] = {"total": int(total), "fetched_at": now.isoformat(), "taken_at": taken_at}
+                TOTALS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                TOTALS_CACHE_PATH.write_text(json.dumps(self.totals_cache))
+        async with self._lock:
+            self.capture["totals"][key] = int(total)
+        return int(total)
 
     def close(self, path: Path) -> None:
+        if self._cache_dirty:
+            self._flush_request_cache()
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.capture, ensure_ascii=False))
-        self.bridge.close(f"{self.used} requests; capture saved to {path}")
 
 
 class ReplayTransport:
-    """Serves a capture {"searches": {query: raw}, "comments": {media_id: raw}} from the browser collector."""
+    """Serves a saved Instagram capture offline for deterministic measurement."""
 
     def __init__(self, path: str | Path):
         capture = json.loads(Path(path).read_text())
         self.searches, self.comment_map = capture.get("searches", {}), capture.get("comments", {})
         self.hashtags, self.feeds = capture.get("hashtags", {}), capture.get("feeds", {})
+        self.profiles = capture.get("profiles", {})
+        self.totals = capture.get("totals", {})
         self.captured_at = (capture.get("captured_at") or "").replace("Z", "+00:00") or None
         self.used = 0
 
@@ -230,77 +458,14 @@ class ReplayTransport:
             return None
         return [normalize_media(m, query) for m in walk_media(self.searches[query])]
 
-    def comments(self, media_id: str) -> dict | None:
+    def profile(self, username: str) -> dict | None:
+        return self.profiles.get(username)
+
+    def comment_total(self, media_id: str, taken_at: str = None) -> int | None:
+        return self.totals.get(str(media_id))
+
+    def comments(self, media_id: str, **_) -> dict | None:
         raw = self.comment_map.get(str(media_id))
         if raw is None:
             return None
-        return {"comments": [normalize_comment(c) for c in raw.get("comments", [])], "total": raw.get("comment_count")}
-
-
-class MockTransport(ReplayTransport):
-    """Simulates/mocks live Instagram access using realistic historical run captures.
-    Enables deterministic end-to-end runs when Instagram private API is blocked or rate-limited.
-    """
-
-    def __init__(self, fixture_path: str | Path | None = None, request_budget: int = 150):
-        if not fixture_path:
-            # Locate the most recent high-quality historical capture
-            candidates = sorted(Path("output/runs").glob("*/instagram_capture.json"), reverse=True)
-            if not candidates:
-                raise RuntimeError("No historical instagram_capture.json found to serve as mock fixture")
-            fixture_path = candidates[0]
-        super().__init__(fixture_path)
-        self.raw_capture = json.loads(Path(fixture_path).read_text())
-        self.budget = request_budget
-        self.used = 0
-        self.captured_at = datetime.now(timezone.utc).isoformat()
-
-    def user_feed(self, username: str, doc_id: str | None = None) -> list[dict] | None:
-        self.used += 1
-        return super().user_feed(username, doc_id)
-
-    def hashtag(self, tag: str) -> dict | None:
-        self.used += 1
-        return super().hashtag(tag)
-
-    def search(self, query: str) -> list[dict] | None:
-        self.used += 1
-        res = super().search(query)
-        if res is not None:
-            return res
-        # If specific query wasn't captured, fuzzily find closest query or return random slice of captured media
-        for k in self.searches:
-            if any(word in k.lower() for word in query.lower().split() if len(word) > 3):
-                return [normalize_media(m, query) for m in walk_media(self.searches[k])]
-        # Return fallback items so the pipeline doesn't choke
-        all_searches = list(self.searches.values())
-        if all_searches:
-            sample = all_searches[hash(query) % len(all_searches)]
-            return [normalize_media(m, query) for m in walk_media(sample)[:6]]
-        return []
-
-    def comments(self, media_id: str) -> dict | None:
-        self.used += 1
-        res = super().comments(media_id)
-        if res is not None:
-            return res
-        # Fallback to any comment thread from capture if media_id not found
-        all_threads = list(self.comment_map.values())
-        if all_threads:
-            sample = all_threads[hash(str(media_id)) % len(all_threads)]
-            return {"comments": [normalize_comment(c) for c in sample.get("comments", [])],
-                    "total": sample.get("comment_count")}
-        return {"comments": [], "total": 0}
-
-    def close(self, path: Path) -> None:
-        """Saves simulated capture to run directory."""
-        mock_capture = {
-            "captured_at": self.captured_at,
-            "searches": self.raw_capture.get("searches", {}),
-            "comments": self.raw_capture.get("comments", {}),
-            "hashtags": self.raw_capture.get("hashtags", {}),
-            "feeds": self.raw_capture.get("feeds", {}),
-            "errors": [],
-            "mocked": True
-        }
-        path.write_text(json.dumps(mock_capture, ensure_ascii=False))
+        return {"comments": list(raw.get("comments", [])), "total": raw.get("comment_count")}

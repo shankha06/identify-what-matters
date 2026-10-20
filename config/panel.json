@@ -1,5 +1,5 @@
 {
-  "description": "Sentinel panel of public Indian Instagram accounts whose posts and comment sections act as a barometer of what India is discussing. One request per account per run reads its latest 12 posts; each post is scored against that account's own baseline. Groups keep the panel balanced across meme/commentary, celebrity, news, regional and sports pages.",
+  "description": "Sentinel panel of public Indian Instagram accounts spanning political parties, leaders, regional units, independent media, commentary, youth and activist groups, memes, civic fact-checkers, news, and creator educators. Each account is scored against its own engagement baseline. Accounts rotate through daily cohorts. Group labels describe source roles, not political stance.",
   "doc_id": "28991540097136703",
   "accounts": [
     {
@@ -11,19 +11,7 @@
       "group": "memes_commentary"
     },
     {
-      "username": "scoopwhoop",
-      "group": "memes_commentary"
-    },
-    {
-      "username": "mensxp",
-      "group": "memes_commentary"
-    },
-    {
       "username": "sarcasticschool_",
-      "group": "memes_commentary"
-    },
-    {
-      "username": "officialhumansofbombay",
       "group": "memes_commentary"
     },
     {
@@ -33,42 +21,6 @@
     {
       "username": "dhruvrathee",
       "group": "creator_commentary"
-    },
-    {
-      "username": "voompla",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "viralbhayani",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "instantbollywood",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "pinkvilla",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "manav.manglani",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "filmygyan",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "bollywoodbubble",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "bollywoodhungama",
-      "group": "celebrity_gossip"
-    },
-    {
-      "username": "filmfare",
-      "group": "celebrity_gossip"
     },
     {
       "username": "ndtv",
@@ -191,26 +143,6 @@
       "group": "news_regional"
     },
     {
-      "username": "espncricinfo",
-      "group": "sports"
-    },
-    {
-      "username": "crictracker",
-      "group": "sports"
-    },
-    {
-      "username": "indiancricketteam",
-      "group": "sports"
-    },
-    {
-      "username": "sportskeeda",
-      "group": "sports"
-    },
-    {
-      "username": "cricketaddictor",
-      "group": "sports"
-    },
-    {
       "username": "fayedsouza",
       "group": "political_commentary"
     },
@@ -227,14 +159,6 @@
       "group": "political_commentary"
     },
     {
-      "username": "thecaravanmagazine",
-      "group": "political_commentary"
-    },
-    {
-      "username": "pmofatish",
-      "group": "creator_commentary"
-    },
-    {
       "username": "samdishbhatia",
       "group": "political_commentary"
     },
@@ -247,22 +171,6 @@
       "group": "political_commentary"
     },
     {
-      "username": "akashbanerjee.in",
-      "group": "political_commentary"
-    },
-    {
-      "username": "andhbhakt_humour",
-      "group": "political_satire"
-    },
-    {
-      "username": "theskinndoctor",
-      "group": "political_satire"
-    },
-    {
-      "username": "nocontext_indianpolitics",
-      "group": "political_satire"
-    },
-    {
       "username": "newslaundry",
       "group": "political_commentary"
     },
@@ -273,10 +181,6 @@
     {
       "username": "thewirein",
       "group": "political_commentary"
-    },
-    {
-      "username": "altnews_in",
-      "group": "factcheck_civic"
     },
     {
       "username": "boomlive_in",
@@ -295,15 +199,7 @@
       "group": "creator_commentary"
     },
     {
-      "username": "beerbiceps",
-      "group": "creator_commentary"
-    },
-    {
       "username": "openletter.in",
-      "group": "creator_commentary"
-    },
-    {
-      "username": "prashant_dhawan",
       "group": "creator_commentary"
     },
     {
@@ -313,10 +209,6 @@
     {
       "username": "kushaspeaks",
       "group": "creator_commentary"
-    },
-    {
-      "username": "ajeetbhartii",
-      "group": "political_commentary"
     },
     {
       "username": "sushantsinha",
@@ -339,19 +231,11 @@
       "group": "political_commentary"
     },
     {
-      "username": "thepamphlet_in",
-      "group": "political_commentary"
-    },
-    {
       "username": "meghupdates",
       "group": "political_commentary"
     },
     {
       "username": "hindu_post",
-      "group": "political_commentary"
-    },
-    {
-      "username": "vikramadityaspeaks",
       "group": "political_commentary"
     },
     {
@@ -375,19 +259,11 @@
       "group": "political_satire"
     },
     {
-      "username": "logical_indian_official",
-      "group": "factcheck_civic"
-    },
-    {
       "username": "article14_india",
       "group": "political_commentary"
     },
     {
       "username": "caravanmagazine",
-      "group": "political_commentary"
-    },
-    {
-      "username": "chalchitra.talks",
       "group": "political_commentary"
     },
     {
@@ -459,19 +335,7 @@
       "group": "political_commentary"
     },
     {
-      "username": "theprint",
-      "group": "news_english"
-    },
-    {
       "username": "thewirehindi",
-      "group": "political_commentary"
-    },
-    {
-      "username": "lallantop_cinema",
-      "group": "memes_commentary"
-    },
-    {
-      "username": "ravishkumarfans",
       "group": "political_commentary"
     },
     {
@@ -507,19 +371,11 @@
       "group": "political_commentary"
     },
     {
-      "username": "dhaval_patel_speaks",
-      "group": "political_commentary"
-    },
-    {
       "username": "gurgaon_civic_action",
       "group": "factcheck_civic"
     },
     {
       "username": "bengal_speaks",
-      "group": "news_regional"
-    },
-    {
-      "username": "south_first_official",
       "group": "news_regional"
     },
     {
@@ -529,6 +385,503 @@
     {
       "username": "gujarat_samachar_official",
       "group": "news_regional"
+    },
+    {
+      "username": "narendramodi",
+      "group": "political_leadership"
+    },
+    {
+      "username": "amitshahofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "jpnaddaofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "rahulgandhi",
+      "group": "political_leadership"
+    },
+    {
+      "username": "priyankagandhivadra",
+      "group": "political_leadership"
+    },
+    {
+      "username": "kharge",
+      "group": "political_leadership"
+    },
+    {
+      "username": "arvindkejriwal",
+      "group": "political_leadership"
+    },
+    {
+      "username": "mamataofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "akhilesh_yadav",
+      "group": "political_leadership"
+    },
+    {
+      "username": "incindia",
+      "group": "political_party"
+    },
+    {
+      "username": "aitcofficial",
+      "group": "political_party"
+    },
+    {
+      "username": "dmkofficial",
+      "group": "political_party"
+    },
+    {
+      "username": "aiadmk.official",
+      "group": "political_party"
+    },
+    {
+      "username": "cpim_official",
+      "group": "political_party"
+    },
+    {
+      "username": "rjd.official",
+      "group": "political_party"
+    },
+    {
+      "username": "jduonline",
+      "group": "political_party"
+    },
+    {
+      "username": "bsp_official_india",
+      "group": "political_party"
+    },
+    {
+      "username": "ncpspeaks",
+      "group": "political_party"
+    },
+    {
+      "username": "shivsena_ubt",
+      "group": "political_party"
+    },
+    {
+      "username": "bharatadivasiparty",
+      "group": "political_party"
+    },
+    {
+      "username": "tvkofficial",
+      "group": "political_party"
+    },
+    {
+      "username": "bjym",
+      "group": "youth_activism"
+    },
+    {
+      "username": "iycindia",
+      "group": "youth_activism"
+    },
+    {
+      "username": "nsui",
+      "group": "youth_activism"
+    },
+    {
+      "username": "sfi_official",
+      "group": "youth_activism"
+    },
+    {
+      "username": "aamaadmipartypunjab",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4delhi",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4up",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4maharashtra",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bharatjodo",
+      "group": "political_campaign"
+    },
+    {
+      "username": "manishsisodia_",
+      "group": "political_leadership"
+    },
+    {
+      "username": "sanjaysinghaap",
+      "group": "political_leadership"
+    },
+    {
+      "username": "samajwadiyuvasabha",
+      "group": "youth_activism"
+    },
+    {
+      "username": "dimple1995",
+      "group": "political_leadership"
+    },
+    {
+      "username": "tmcpofficial",
+      "group": "youth_activism"
+    },
+    {
+      "username": "dmk_youth_wing",
+      "group": "youth_activism"
+    },
+    {
+      "username": "mkstalin",
+      "group": "political_leadership"
+    },
+    {
+      "username": "udhay_stalin",
+      "group": "political_leadership"
+    },
+    {
+      "username": "epsoffice",
+      "group": "political_leadership"
+    },
+    {
+      "username": "cpimkerala",
+      "group": "regional_politics"
+    },
+    {
+      "username": "tejashwiyadav",
+      "group": "political_leadership"
+    },
+    {
+      "username": "laluprasadyadav",
+      "group": "political_leadership"
+    },
+    {
+      "username": "nitishkumar",
+      "group": "political_leadership"
+    },
+    {
+      "username": "mayawati",
+      "group": "political_leadership"
+    },
+    {
+      "username": "mayawati_bsp",
+      "group": "political_leadership"
+    },
+    {
+      "username": "akashanand_bsp",
+      "group": "political_leadership"
+    },
+    {
+      "username": "sharadpawar.official",
+      "group": "political_leadership"
+    },
+    {
+      "username": "supriyasule",
+      "group": "political_leadership"
+    },
+    {
+      "username": "yuvasena_official",
+      "group": "youth_activism"
+    },
+    {
+      "username": "uddhavthackeray",
+      "group": "political_leadership"
+    },
+    {
+      "username": "adityathackeray",
+      "group": "political_leadership"
+    },
+    {
+      "username": "kumarrajkumarroat",
+      "group": "political_leadership"
+    },
+    {
+      "username": "bhimarmychief",
+      "group": "political_leadership"
+    },
+    {
+      "username": "actorvijay",
+      "group": "political_leadership"
+    },
+    {
+      "username": "theopindia",
+      "group": "media_independent"
+    },
+    {
+      "username": "thetatva",
+      "group": "media_independent"
+    },
+    {
+      "username": "akashbanerjee",
+      "group": "political_satire"
+    },
+    {
+      "username": "andhbhaktmemes",
+      "group": "political_satire"
+    },
+    {
+      "username": "trollindianpolitics",
+      "group": "political_commentary"
+    },
+    {
+      "username": "rightlog",
+      "group": "media_independent"
+    },
+    {
+      "username": "cockroachisback",
+      "group": "political_leadership"
+    },
+    {
+      "username": "abhijeetdipke",
+      "group": "political_leadership"
+    },
+    {
+      "username": "ashutosh_ranka",
+      "group": "youth_activism"
+    },
+    {
+      "username": "souravdas_official",
+      "group": "youth_activism"
+    },
+    {
+      "username": "aisaindia",
+      "group": "youth_activism"
+    },
+    {
+      "username": "myogi_adityanath",
+      "group": "political_leadership"
+    },
+    {
+      "username": "himantabiswa",
+      "group": "political_leadership"
+    },
+    {
+      "username": "devendrafadnavis",
+      "group": "political_leadership"
+    },
+    {
+      "username": "shivrajsinghchouhan",
+      "group": "political_leadership"
+    },
+    {
+      "username": "nityanand_rai",
+      "group": "political_leadership"
+    },
+    {
+      "username": "piyushgoyalofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "smritiiraniofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "sambitswaraj",
+      "group": "political_leadership"
+    },
+    {
+      "username": "tejashvisurya",
+      "group": "political_leadership"
+    },
+    {
+      "username": "anuragthakur",
+      "group": "political_leadership"
+    },
+    {
+      "username": "bjp4kerala",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4karnataka",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4bengal",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4rajasthan",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4mp",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4bihar",
+      "group": "regional_politics"
+    },
+    {
+      "username": "bjp4gujarat",
+      "group": "regional_politics"
+    },
+    {
+      "username": "sachinpilot",
+      "group": "political_leadership"
+    },
+    {
+      "username": "revanthsays",
+      "group": "political_leadership"
+    },
+    {
+      "username": "siddaramaiah.official",
+      "group": "political_leadership"
+    },
+    {
+      "username": "bhupeshbaghel",
+      "group": "political_leadership"
+    },
+    {
+      "username": "kanhaiyakumar",
+      "group": "political_leadership"
+    },
+    {
+      "username": "supriyankasharma",
+      "group": "political_leadership"
+    },
+    {
+      "username": "congress4kerala",
+      "group": "political_leadership"
+    },
+    {
+      "username": "inctelangana",
+      "group": "regional_politics"
+    },
+    {
+      "username": "inckarnataka",
+      "group": "regional_politics"
+    },
+    {
+      "username": "incmaharashtra",
+      "group": "regional_politics"
+    },
+    {
+      "username": "incuttarakhand",
+      "group": "regional_politics"
+    },
+    {
+      "username": "incrajasthan",
+      "group": "regional_politics"
+    },
+    {
+      "username": "incup",
+      "group": "regional_politics"
+    },
+    {
+      "username": "ncbn",
+      "group": "regional_politics"
+    },
+    {
+      "username": "pawankalyan",
+      "group": "regional_politics"
+    },
+    {
+      "username": "ktrtrs",
+      "group": "regional_politics"
+    },
+    {
+      "username": "naveenpatnaik",
+      "group": "regional_politics"
+    },
+    {
+      "username": "pinarayivijayan",
+      "group": "regional_politics"
+    },
+    {
+      "username": "jknc",
+      "group": "regional_politics"
+    },
+    {
+      "username": "mehboobamufti",
+      "group": "regional_politics"
+    },
+    {
+      "username": "omarabdullah",
+      "group": "regional_politics"
+    },
+    {
+      "username": "abplive",
+      "group": "media_independent"
+    },
+    {
+      "username": "news18india",
+      "group": "media_independent"
+    },
+    {
+      "username": "firstpost",
+      "group": "media_independent"
+    },
+    {
+      "username": "timesnow",
+      "group": "media_independent"
+    },
+    {
+      "username": "newsnationtv",
+      "group": "media_independent"
+    },
+    {
+      "username": "sarthakgoswami",
+      "group": "political_commentary"
+    },
+    {
+      "username": "theanalystindia",
+      "group": "political_commentary"
+    },
+    {
+      "username": "karolina_goswami",
+      "group": "political_commentary"
+    },
+    {
+      "username": "abhishekbanerjee",
+      "group": "political_commentary"
+    },
+    {
+      "username": "vikasdivyakirti",
+      "group": "political_commentary"
+    },
+    {
+      "username": "khan_sir_patna",
+      "group": "political_commentary"
+    },
+    {
+      "username": "mygovindia",
+      "group": "government_baseline"
+    },
+    {
+      "username": "pibindia",
+      "group": "government_baseline"
+    },
+    {
+      "username": "pmindia",
+      "group": "government_baseline"
+    },
+    {
+      "username": "cyss_official",
+      "group": "youth_activism"
+    },
+    {
+      "username": "aamaadmipartydelhi",
+      "group": "regional_politics"
+    },
+    {
+      "username": "samajwadipartyofficial",
+      "group": "political_party"
+    },
+    {
+      "username": "abhishekbanerjeeofficial",
+      "group": "political_leadership"
+    },
+    {
+      "username": "dyfiofficial",
+      "group": "youth_activism"
+    },
+    {
+      "username": "nationalherald",
+      "group": "media_independent"
+    },
+    {
+      "username": "ecisveep",
+      "group": "government_baseline"
     }
-  ]
+  ],
+  "accounts_per_run": 225
 }

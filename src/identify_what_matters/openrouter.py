@@ -6,13 +6,23 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 from dotenv import load_dotenv
 import requests
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-6.1-sol"
+DEFAULT_MODEL = "anthropic/claude-haiku-5.5"
+
+# Models that support OpenRouter's reasoning extension and benefit from a
+# two-turn self-review continuation.  Everything else gets a single call.
+_REASONING_MODELS = frozenset({
+    "openai/gpt-6.1-sol",
+    "anthropic/claude-4-6-sonnet", "anthropic/claude-sonnet-4-5",
+    "google/gemini-3.8-flash",
+    "anthropic/claude-haiku-5.5"
+})
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
@@ -38,24 +48,37 @@ class OpenRouterClient:
             "Content-Type": "application/json",
         }
 
+    def _uses_reasoning(self) -> bool:
+        return any(self.model.startswith(m) or self.model == m for m in _REASONING_MODELS)
+
     def _complete(self, messages: list[dict[str, Any]], timeout: int) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "reasoning": {"enabled": True},
         }
+        if self._uses_reasoning():
+            payload["reasoning"] = {"enabled": True}
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if self.max_tokens is not None:
             payload["max_tokens"] = self.max_tokens
 
-        response = requests.post(
-            url=API_URL,
-            headers=self._headers,
-            data=json.dumps(payload),
-            timeout=timeout,
-        )
-        response.raise_for_status()
+        for attempt in range(4):
+            response = requests.post(
+                url=API_URL,
+                headers=self._headers,
+                data=json.dumps(payload),
+                timeout=timeout,
+            )
+            if response.status_code in (429, 503, 529):
+                retry_after = int(response.headers.get("Retry-After", 0) or 0)
+                wait = max(retry_after, 2 ** attempt)
+                if attempt < 3:
+                    time.sleep(wait)
+                    continue
+            response.raise_for_status()
+            return response.json()
+        response.raise_for_status()  # unreachable, keeps type checker happy
         return response.json()
 
     def generate(self, user_prompt: str, system_instruction: str = "",
@@ -67,25 +90,28 @@ class OpenRouterClient:
 
         first = self._complete(messages, request_timeout)
         first_message = first["choices"][0]["message"]
-        messages.extend([
-            {
-                "role": "assistant",
-                "content": first_message.get("content"),
-                "reasoning_details": first_message.get("reasoning_details"),
-            },
-            {
-                "role": "user",
-                "content": "Review your answer carefully. Follow the original instructions and return only the final answer.",
-            },
-        ])
-        second = self._complete(messages, request_timeout)
-        second_message = second["choices"][0]["message"]
         first_usage = first.get("usage") or {}
-        second_usage = second.get("usage") or {}
+
+        # Two-turn self-review only for reasoning-capable models; skip for fast models.
+        if self._uses_reasoning():
+            assistant_turn: dict[str, Any] = {"role": "assistant", "content": first_message.get("content")}
+            if first_message.get("reasoning_details"):
+                assistant_turn["reasoning_details"] = first_message["reasoning_details"]
+            messages.extend([
+                assistant_turn,
+                {"role": "user", "content": "Review your answer carefully. Follow the original instructions and return only the final answer."},
+            ])
+            second = self._complete(messages, request_timeout)
+            second_message = second["choices"][0]["message"]
+            second_usage = second.get("usage") or {}
+            return OpenRouterResponse(
+                text=second_message.get("content") or "",
+                input_tokens=(first_usage.get("prompt_tokens", 0) or 0) + (second_usage.get("prompt_tokens", 0) or 0),
+                output_tokens=(first_usage.get("completion_tokens", 0) or 0) + (second_usage.get("completion_tokens", 0) or 0),
+            )
+
         return OpenRouterResponse(
-            text=second_message.get("content") or "",
-            input_tokens=(first_usage.get("prompt_tokens", 0) or 0)
-            + (second_usage.get("prompt_tokens", 0) or 0),
-            output_tokens=(first_usage.get("completion_tokens", 0) or 0)
-            + (second_usage.get("completion_tokens", 0) or 0),
+            text=first_message.get("content") or "",
+            input_tokens=first_usage.get("prompt_tokens", 0) or 0,
+            output_tokens=first_usage.get("completion_tokens", 0) or 0,
         )

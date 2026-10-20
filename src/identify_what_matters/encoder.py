@@ -8,7 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-MODEL_CANDIDATES = ("artifacts/topic-models/multilingual-e5-base-events-real-v4",
+MODEL_CANDIDATES = ("artifacts/topic-models/multilingual-e5-base-events-real-v5",
+                    "artifacts/topic-models/multilingual-e5-base-events-real-v4",
                     "artifacts/topic-models/multilingual-e5-base-events-real",
                     "artifacts/topic-models/multilingual-e5-base-events")
 

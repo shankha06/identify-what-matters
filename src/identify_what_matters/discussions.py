@@ -13,16 +13,18 @@ that can be replayed deterministically offline for analysis.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from statistics import median
 
 from identify_what_matters import encoder
 from identify_what_matters.instagram_access import scrub
-from identify_what_matters.trends import CATEGORIES, SEED_HASHTAGS, SYSTEM, hours_since, probe
+from identify_what_matters.trends import CATEGORIES, POLITICS_HASHTAGS, SEED_HASHTAGS, SYSTEM, hours_since, probe
 
 PANEL_PATH = Path(__file__).resolve().parents[2] / "config" / "panel.json"
 KINDS = ("news_event", "debate_controversy", "viral_moment", "meme_format", "celebrity_gossip", "sports_moment",
@@ -35,6 +37,24 @@ RITUAL = re.compile(r"दर्शन|आरती|darshan|aarti|bhakti|#jai|jai
 
 def load_panel(path: str | Path | None = None) -> dict:
     return json.loads(Path(path or PANEL_PATH).read_text())
+
+
+def panel_accounts_for_run(panel: dict, plan: dict, reference) -> list[dict]:
+    accounts = panel["accounts"]
+    accounts_per_run = panel.get("accounts_per_run", len(accounts))
+    if not isinstance(accounts_per_run, int) or accounts_per_run < 1:
+        raise ValueError("accounts_per_run must be a positive integer")
+    if len(accounts) <= accounts_per_run:
+        return accounts
+
+    cohort_count = math.ceil(len(accounts) / accounts_per_run)
+    run_id = str(plan.get("run_id") or "")
+    try:
+        run_day = datetime.strptime(run_id[:8], "%Y%m%d").date()
+    except ValueError:
+        run_day = reference.date()
+    cohort_index = run_day.toordinal() % cohort_count
+    return accounts[cohort_index::cohort_count]
 
 
 def select_trend_terms(signals: list[dict], exclude: set[str], limit: int = 20) -> list[dict]:
@@ -56,7 +76,7 @@ def select_trend_terms(signals: list[dict], exclude: set[str], limit: int = 20) 
     return terms
 
 
-def panel_scores(feeds: dict[str, list[dict]], reference, max_age_hours: float = 48,
+def panel_scores(feeds: dict[str, list[dict]], reference, max_age_hours: float = 168,
                  baselines: dict[str, dict] | None = None) -> list[dict]:
     """Score fresh panel posts against their own account's typical post (CrowdTangle-style overperformance).
 
@@ -70,27 +90,27 @@ def panel_scores(feeds: dict[str, list[dict]], reference, max_age_hours: float =
         if not usable:
             continue
         settled = [m for m in usable if (hours_since(m["taken_at"], reference) or 0) >= 6]
+        verified = [m for m in settled if m.get("comment_verified")]
         hist = baselines.get(account)
-        if len(settled) >= 3:
-            cur_comments = median(m["comment_count"] or 0 for m in settled)
+        if settled:
             cur_likes = median(m["like_count"] or 0 for m in settled)
-            cur_ratio = median((m["comment_count"] or 0) / (m["like_count"] + 1) for m in settled)
+        elif hist:
+            cur_likes = hist["median_likes"]
+        else:
+            cur_likes = median(m["like_count"] or 0 for m in usable)
+        if len(verified) >= 3:
+            cur_comments = median(m["comment_count"] or 0 for m in verified)
+            cur_ratio = median((m["comment_count"] or 0) / (m["like_count"] + 1) for m in verified)
             if hist:
                 base_comments = 0.5 * hist["median_comments"] + 0.5 * cur_comments
-                base_likes = 0.5 * hist["median_likes"] + 0.5 * cur_likes
                 base_ratio = 0.5 * hist["median_ratio"] + 0.5 * cur_ratio
             else:
-                base_comments, base_likes, base_ratio = cur_comments, cur_likes, cur_ratio
+                base_comments, base_ratio = cur_comments, cur_ratio
         elif hist:
-            base_comments = hist["median_comments"]
-            base_likes = hist["median_likes"]
-            base_ratio = hist["median_ratio"]
-        elif usable:
-            base_comments = median(m["comment_count"] or 0 for m in usable)
-            base_likes = median(m["like_count"] or 0 for m in usable)
-            base_ratio = median((m["comment_count"] or 0) / (m["like_count"] + 1) for m in usable)
+            base_comments, base_ratio = hist["median_comments"], hist["median_ratio"]
         else:
-            continue
+            base_comments, base_ratio = None, None
+        base_likes = (0.5 * hist["median_likes"] + 0.5 * cur_likes) if hist and settled else cur_likes
 
         for item in usable:
             age = hours_since(item["taken_at"], reference)
@@ -98,70 +118,184 @@ def panel_scores(feeds: dict[str, list[dict]], reference, max_age_hours: float =
                 continue
             weight = max(0.25, min(1.0, age / 24))
             comments, likes = item["comment_count"] or 0, item["like_count"] or 0
-            over_comments = (comments + 5) / (base_comments * weight + 5)
             over_likes = (likes + 20) / (base_likes * weight + 20)
-            ratio_lift = (comments / (likes + 1)) / base_ratio if base_ratio > 0 else 1.0
+            if base_comments is not None and item.get("comment_verified"):
+                over_comments = (comments + 5) / (base_comments * weight + 5)
+                ratio_lift = (comments / (likes + 1)) / base_ratio if base_ratio > 0 else 1.0
+                heat_basis = "comments_and_likes"
+            else:
+                over_comments, ratio_lift, heat_basis = None, None, "likes_only"
             cap_val = item.get("caption")
             cap_str = cap_val.get("text", "") if isinstance(cap_val, dict) else str(cap_val or "")
             item["panel"] = {"account": account, "group": item.get("panel_group"),
                              "ritual": bool(RITUAL.search(cap_str)),
-                             "over_comments": round(over_comments, 2), "over_likes": round(over_likes, 2),
-                             "ratio_lift": round(ratio_lift, 2),
+                             "over_comments": round(over_comments, 2) if over_comments is not None else None,
+                             "over_likes": round(over_likes, 2),
+                             "ratio_lift": round(ratio_lift, 2) if ratio_lift is not None else None,
+                             "heat_basis": heat_basis,
                              "heat": round(math.log(over_comments) + 0.5 * math.log(over_likes)
-                                           + 0.5 * math.log(max(ratio_lift, 0.1)), 3)}
+                                           + 0.5 * math.log(max(ratio_lift, 0.1)), 3) if heat_basis == "comments_and_likes"
+                             else round(0.5 * math.log(over_likes), 3)}
             hot.append(item)
     return sorted(hot, key=lambda m: m["panel"]["heat"], reverse=True)
 
 
-def collect_instagram(plan: dict, transport, reference, panel: dict, terms: list[dict],
-                      panel_comment_posts: int = 25, term_comment_posts: int = 10, seed_hashtags: int = 8,
-                      baselines: dict[str, dict] | None = None, early_comment_posts: int = 12,
-                      comment_posts: int = 3) -> dict:
+_INDIA_RELEVANT_RE = re.compile(
+    r"\b("
+    # parties
+    r"bjp|congress|inc|aap|tmc|dmk|sp|bsp|brs|shiv sena|shivsena|aimim|ncp|jdu|rjd|ysrcp|tdp|"
+    # politicians / leaders
+    r"modi|rahul|gandhi|amit shah|kejriwal|mamata|yogi|nitish|chandrashekhar|akhilesh|pawar|"
+    r"mk stalin|karunanidhi|jayalalitha|gehlot|siddaramaiah|kharge|smriti|piyush goyal|"
+    # governance / political terms
+    r"parliament|loksabha|rajya sabha|vidhansabha|election|vote|mandate|constitution|"
+    r"pm |chief minister|home minister|finance minister|government|cabinet|minister|"
+    r"nda|upa|india alliance|mahagathbandhan|opposition|ruling party|"
+    r"cbi|ed |enforcement directorate|ias |ips |rss|vhp|bajrang|sangh|"
+    # economy
+    r"economy|gdp|inflation|rupee|budget|gst|tax|sensex|nifty|rbi|sebi|"
+    r"unemployment|poverty|fuel price|petrol|diesel|onion price|food price|"
+    r"make in india|startup india|upi|digital india|"
+    # india-specific social / political issues
+    r"farmer|agriculture|protest|agitation|bandh|strike|reservation|caste|"
+    r"mandir|masjid|waqf|article 370|caa|nrc|ram mandir|ayodhya|"
+    r"kerala|karnataka|andhra|telangana|gujarat|maharashtra|rajasthan|"
+    r"punjab|haryana|uttarakhand|himachal|jammu|kashmir|ladakh|"
+    r"corruption|scam|arrest|raid|chargesheet|court|supreme court|high court"
+    r")\b",
+    re.I,
+)
+
+def _is_india_relevant(entry: dict) -> bool:
+    """Proactive radar and X-trends terms are kept as-is; filter Google Trends by political/economy keywords."""
+    if entry.get("source") in ("proactive_radar", "x_trends"):
+        return True
+    return bool(_INDIA_RELEVANT_RE.search(entry.get("term", "")))
+
+
+def _extract_organic_hashtags(bundle: dict, limit: int) -> list[str]:
+    """Extract the most-used India-political hashtags from panel captions collected this run.
+    Returns up to `limit` lowercase tag strings (no #). Falls back to POLITICS_HASHTAGS to fill gaps."""
+    tag_counts: dict[str, int] = defaultdict(int)
+    for items in bundle["feeds"].values():
+        for item in items:
+            caption = item.get("caption") or {}
+            text = caption.get("text", "") if isinstance(caption, dict) else str(caption)
+            for tag in re.findall(r"#(\w+)", text.lower()):
+                if len(tag) >= 4 and _INDIA_RELEVANT_RE.search(tag):
+                    tag_counts[tag] += 1
+    organic = [tag for tag, _ in sorted(tag_counts.items(), key=lambda x: -x[1])]
+    seen = set(organic)
+    for fallback_tag in POLITICS_HASHTAGS:
+        clean = fallback_tag.lstrip("#").lower()
+        if clean not in seen:
+            organic.append(clean)
+            seen.add(clean)
+    return organic[:limit]
+
+
+def _build_commenter_overlap(bundle: dict) -> dict:
+    """Map commenter identifier → list of post codes they appeared in across all fetched comment threads."""
+    user_posts: dict[str, list[str]] = defaultdict(list)
+    for media in _all_media(bundle):
+        for comment in (media.get("comments") or []):
+            # normalized comments store 'author' (username) and 'author_id' (numeric)
+            uid = comment.get("author") or comment.get("author_id") or ""
+            if uid:
+                user_posts[uid].append(media["code"])
+    return {u: list(dict.fromkeys(posts)) for u, posts in user_posts.items() if len(set(posts)) >= 2}
+
+
+async def collect_instagram(plan: dict, transport, reference, panel: dict, terms: list[dict],
+                           panel_comment_posts: int = 100, term_comment_posts: int = 25, seed_hashtags: int = 15,
+                           baselines: dict[str, dict] | None = None, early_comment_posts: int = 40,
+                           comment_posts: int = 3, panel_total_budget: int = 800) -> dict:
     """Every Instagram request of a run, in priority order (budget may end the run early). No LLM calls."""
     bundle = {"feeds": {}, "missing_accounts": [], "terms": {}, "probes": {}, "seeds": {}, "comments": {},
               "stopped": None}
 
-    def call(method, *args):
+    _ig_slots = asyncio.Semaphore(10)
+
+    async def call(method, *args, _timeout: int = 45, **kwargs):
         if bundle["stopped"]:
             return None
         try:
-            return method(*args)
+            async with _ig_slots:
+                result = method(*args, **kwargs)
+                # Hiker collection is async; saved-capture replay is synchronous.
+                if asyncio.iscoroutine(result):
+                    return await asyncio.wait_for(result, timeout=_timeout)
+                return result
+        except asyncio.TimeoutError:
+            print(f"[collect] timeout ({_timeout}s) on {getattr(method, '__name__', method)}", flush=True)
+            return None
         except Exception as error:
             text = str(error).lower()
             if "budget" in text or "blocked" in text or "challenge" in text or "login" in text:
                 bundle["stopped"] = f"{type(error).__name__}: {str(error)[:120]}"
                 print(f"[collect] stopping Instagram requests: {bundle['stopped']}", flush=True)
+            else:
+                print(f"[collect] {getattr(method, '__name__', method)} failed: {type(error).__name__}: "
+                      f"{str(error)[:120]}", flush=True)
             return None
 
-    def fetch_comments(item):
+    async def fetch_comments(item):
         if item["code"] in bundle["comments"]:
             return
-        sampled = call(transport.comments, item["id"])
+        sampled = await call(transport.comments, item["id"], _timeout=150)
         if sampled:
             bundle["comments"][item["code"]] = sampled
 
-    for account in panel["accounts"]:
-        items = call(transport.user_feed, account["username"], panel.get("doc_id"))
+    selected_accounts = panel_accounts_for_run(panel, plan, reference)
+    _sem = asyncio.Semaphore(25)
+
+    async def _fetch_account(account):
+        async with _sem:
+            items = await call(transport.user_feed, account["username"], panel.get("doc_id"))
         if items is None:
             bundle["missing_accounts"].append(account["username"])
-            continue
-        for item in items:
-            item["panel_group"] = account["group"]
-        bundle["feeds"][account["username"]] = items
-    print(f"[collect] panel: {len(bundle['feeds'])} accounts read, {len(bundle['missing_accounts'])} missing", flush=True)
+        else:
+            for item in items:
+                item["panel_group"] = account["group"]
+            bundle["feeds"][account["username"]] = items
+            print(f"[collect] panel: {len(bundle['feeds'])} accounts read, "
+                  f"{len(bundle['missing_accounts'])} missing; "
+                  f"selected {len(selected_accounts)}/{len(panel['accounts'])}", flush=True)
+
+    await asyncio.gather(*[_fetch_account(acct) for acct in selected_accounts], return_exceptions=True)
+
+    feed_items = sorted((m for items in bundle["feeds"].values() for m in items if m.get("taken_at")),
+                        key=lambda m: m["taken_at"], reverse=True)
+    for items in bundle["feeds"].values():
+        for m in items:
+            m["comment_verified"] = False
+    spent = 0
+    for start in range(0, len(feed_items), 10):
+        if spent >= panel_total_budget:
+            break
+        batch = feed_items[start:start + 10]
+        used_before = transport.used
+        totals = await asyncio.gather(*[call(transport.comment_total, m["id"], m["taken_at"]) for m in batch],
+                                      return_exceptions=True)
+        spent += transport.used - used_before
+        for m, total in zip(batch, totals):
+            if isinstance(total, int):
+                m["feed_comment_count"] = m.get("comment_count")
+                m["comment_count"] = total
+                m["comment_verified"] = True
+    verified = sum(m.get("comment_verified", False) for items in bundle["feeds"].values() for m in items)
+    total_posts = sum(len(items) for items in bundle["feeds"].values())
+    print(f"[collect] verified comment totals: {verified}/{total_posts} panel posts ({spent} requests)", flush=True)
+
     scored = [m for m in panel_scores(bundle["feeds"], reference, baselines=baselines) if not m["panel"]["ritual"]]
-    # Young over-performers get comment threads first: their opinions are the earliest breakout evidence.
     early = sorted((m for m in scored if (hours_since(m["taken_at"], reference) or 1e9) <= 12
                     and (m["comment_count"] or 0) >= 15
-                    and (m["panel"]["over_comments"] >= 2 or m["panel"]["ratio_lift"] >= 1.5)),
+                    and ((m["panel"]["over_comments"] or 0) >= 2 or (m["panel"]["ratio_lift"] or 0) >= 1.5)),
                    key=lambda m: m["panel"]["heat"] + math.log(12 / max(hours_since(m["taken_at"], reference), 0.5)),
                    reverse=True)
-    hot = [m for m in scored if m["panel"]["over_comments"] >= 1.5 or m["panel"]["ratio_lift"] >= 2]
-    for item in list({m["code"]: m for m in early[:early_comment_posts] + hot}.values())[:panel_comment_posts]:
-        fetch_comments(item)
+    hot = [m for m in scored if (m["panel"]["over_comments"] or 0) >= 1.5 or (m["panel"]["ratio_lift"] or 0) >= 2]
+    panel_comment_targets = list({m["code"]: m for m in early[:early_comment_posts] + hot}.values())[:panel_comment_posts]
 
-    # Proactive Autonomous Radar: identify sudden flame posts / velocity shocks
-    # and extract comment entities to proactively expand search queries before external news
     from identify_what_matters.proactive_radar import identify_proactive_candidates, generate_proactive_probe_queries
     proactive_cands = identify_proactive_candidates(bundle, reference, baselines=baselines)
     proactive_queries = generate_proactive_probe_queries(proactive_cands, max_queries=8)
@@ -170,36 +304,116 @@ def collect_instagram(plan: dict, transport, reference, panel: dict, terms: list
     bundle["proactive_candidates"] = proactive_cands
     bundle["proactive_queries"] = proactive_queries
 
-    # Search trending terms + autonomous proactive entity queries
     all_search_terms = terms + [{"term": q, "source": "proactive_radar"} for q in proactive_queries]
-    for entry in all_search_terms:
-        if entry["term"] in bundle["terms"]:
-            continue
-        results = call(transport.search, entry["term"])
-        if results is not None:
-            bundle["terms"][entry["term"]] = results
+    search_needed = [e for e in all_search_terms
+                     if e["term"] not in bundle["terms"] and _is_india_relevant(e)]
 
     probe_keys = set(plan.get("probe_keys", []))
-    for topic in [t for t in plan.get("topics", []) if t["topic_key"] in probe_keys]:
-        if not bundle["stopped"]:
-            bundle["probes"][topic["topic_key"]] = probe(topic, transport, reference, comment_posts=comment_posts)
-    for tag in SEED_HASHTAGS[:seed_hashtags]:
-        result = call(transport.hashtag, tag)
+    probe_topics = [t for t in plan.get("topics", []) if t["topic_key"] in probe_keys]
+    hashtag_targets = _extract_organic_hashtags(bundle, seed_hashtags)
+    print(f"[collect] organic hashtags from panel captions: {hashtag_targets}", flush=True)
+
+    _done = {"panel_comments": 0, "searches": 0, "hashtags": 0, "probes": 0}
+    filtered_out = len([e for e in all_search_terms if e["term"] not in bundle["terms"]]) - len(search_needed)
+    print(f"[collect] parallel phase: {len(panel_comment_targets)} panel comments, "
+          f"{len(search_needed)} searches ({filtered_out} non-political filtered), "
+          f"{len(hashtag_targets)} hashtags, {len(probe_topics)} probes "
+          f"(budget used: {transport.used})", flush=True)
+
+    async def _do_panel_comment(item):
+        await fetch_comments(item)
+        _done["panel_comments"] += 1
+        print(f"[collect] panel comments: {_done['panel_comments']}/{len(panel_comment_targets)} done", flush=True)
+
+    async def _do_search(entry):
+        results = await call(transport.search, entry["term"])
+        if results is not None:
+            bundle["terms"][entry["term"]] = results
+        _done["searches"] += 1
+        status = "failed" if results is None else f"{len(results)} posts"
+        print(f"[collect] searches: {_done['searches']}/{len(search_needed)} '{entry['term']}'"
+              f" -> {status}", flush=True)
+
+    async def _do_hashtag(tag):
+        result = await call(transport.hashtag, tag)
         if result:
             bundle["seeds"][tag] = result["media"]
+        _done["hashtags"] += 1
+        print(f"[collect] hashtags: {_done['hashtags']}/{len(hashtag_targets)} #{tag}"
+              f" -> {len((result or {}).get('media', []))} posts", flush=True)
+
+    async def _do_probe(topic):
+        if not bundle["stopped"]:
+            bundle["probes"][topic["topic_key"]] = await probe(
+                topic, transport, reference, comment_posts=2, comment_pages=1, reply_threads=0)
+        _done["probes"] += 1
+        title_short = (topic.get("title") or topic["topic_key"])[:60]
+        print(f"[collect] probes: {_done['probes']}/{len(probe_topics)} '{topic['topic_key']}' — {title_short}", flush=True)
+
+    await asyncio.gather(
+        *[_do_panel_comment(item) for item in panel_comment_targets],
+        *[_do_search(e) for e in search_needed],
+        *[_do_hashtag(tag) for tag in hashtag_targets],
+        *[_do_probe(t) for t in probe_topics],
+        return_exceptions=True,
+    )
+
     fresh_term_posts = []
     for results in bundle["terms"].values():
-        fresh = [m for m in results if (hours_since(m["taken_at"], reference) or 1e9) <= 72]
-        if fresh:
-            fresh_term_posts.append(max(fresh, key=lambda m: m.get("comment_count") or 0))
-    for item in sorted(fresh_term_posts, key=lambda m: m.get("comment_count") or 0, reverse=True)[:term_comment_posts]:
-        fetch_comments(item)
+        fresh = [m for m in results if (hours_since(m["taken_at"], reference) or 1e9) <= 168]
+        fresh_term_posts += sorted(fresh, key=lambda m: m.get("comment_count") or 0, reverse=True)[:2]
+    term_comment_targets = sorted(fresh_term_posts, key=lambda m: m.get("comment_count") or 0, reverse=True)[:term_comment_posts]
+    _done_tc = {"n": 0}
+    print(f"[collect] term comments: {len(term_comment_targets)} top-commented posts (budget used: {transport.used})", flush=True)
+
+    async def _do_term_comment(item):
+        await fetch_comments(item)
+        _done_tc["n"] += 1
+        print(f"[collect] term comments: {_done_tc['n']}/{len(term_comment_targets)} done", flush=True)
+
+    await asyncio.gather(*[_do_term_comment(item) for item in term_comment_targets], return_exceptions=True)
+
+    deep_targets = []
+    for topic in probe_topics:
+        media = (bundle["probes"].get(topic["topic_key"]) or {}).get("media", [])
+        commentable = [m for m in media if (m.get("comment_count") or 0) > 0]
+        ranked = sorted(commentable, key=lambda m: m["comment_count"], reverse=True)[:comment_posts]
+        deep_targets += [m for m in ranked if not m.get("comments")]
+
+    async def _do_deep_comment(media):
+        sampled = await call(transport.comments, media["id"], _timeout=150, max_pages=2, max_reply_threads=3)
+        if sampled:
+            bundle["comments"][media["code"]] = sampled
+            media["comments"] = sampled["comments"]
+
+    print(f"[collect] deep comments: {len(deep_targets)} posts across {len(probe_topics)} topics", flush=True)
+    for start in range(0, len(deep_targets), 10):
+        await asyncio.gather(*[_do_deep_comment(m) for m in deep_targets[start:start + 10]], return_exceptions=True)
     for media in _all_media(bundle):
         sampled = bundle["comments"].get(media["code"])
         if sampled and not media.get("comments"):
             media["comments"] = sampled["comments"]
             if media.get("comment_count") is None:
                 media["comment_count"] = sampled["total"]
+
+    bundle["commenter_overlap"] = _build_commenter_overlap(bundle)
+    cross_topic = sum(1 for posts in bundle["commenter_overlap"].values() if len(posts) >= 3)
+    print(f"[collect] commenter overlap: {len(bundle['commenter_overlap'])} users on 2+ posts, "
+          f"{cross_topic} on 3+ posts", flush=True)
+
+    overlap_users = sorted((u for u in bundle["commenter_overlap"] if not u.isdigit()),
+                           key=lambda u: -len(set(bundle["commenter_overlap"][u])))[:50]
+    bundle["profiles"] = {}
+
+    async def _do_profile(username):
+        profile = await call(transport.profile, username)
+        if profile:
+            bundle["profiles"][username] = profile
+
+    for start in range(0, len(overlap_users), 10):
+        await asyncio.gather(*[_do_profile(u) for u in overlap_users[start:start + 10]], return_exceptions=True)
+    print(f"[collect] commenter profiles: {len(bundle['profiles'])}/{len(overlap_users)} fetched", flush=True)
+
     return bundle
 
 
@@ -223,7 +437,7 @@ def discover_discussions(bundle: dict, terms: list[dict], llm, reference, max_cl
                + [(m, None) for items in bundle["seeds"].values() for m in items])
     for item, term in sources:
         age = hours_since(item["taken_at"], reference)
-        if age is None or age > 72 or (len(scrub(item["caption"])) <= 15 and not item.get("comments")):
+        if age is None or age > 168 or (len(scrub(item["caption"])) <= 15 and not item.get("comments")):
             continue
         if item["code"] in index:
             if term:
@@ -346,7 +560,7 @@ def _early_spark(item: dict, reference) -> bool:
     """A single young post already far above its account's usual comments: too early to have spread yet."""
     panel, age = item.get("panel") or {}, hours_since(item.get("taken_at"), reference)
     return (age is not None and age <= 6 and (item.get("comment_count") or 0) >= 30
-            and (panel.get("over_comments", 0) >= 3 or panel.get("ratio_lift", 0) >= 2))
+            and ((panel.get("over_comments") or 0) >= 3 or (panel.get("ratio_lift") or 0) >= 2))
 
 
 def _top_comments(item: dict, k: int) -> list[dict]:

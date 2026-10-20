@@ -1,12 +1,16 @@
-"""Cached JSON generation and batching on top of OpenRouter."""
+"""Cached JSON generation and batching with Element Gateway Claude Sonnet 4.6 and OpenRouter fallback."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,18 +19,89 @@ from identify_what_matters.utils import parse_json_payload
 
 parse_json = parse_json_payload
 
+# Load .env early so LLM_BACKEND and other vars are available before make_backend_client reads them.
+with contextlib.suppress(ImportError):
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+
+HELPER_DIR = Path(os.environ.get("LLM_HELPER_DIR", "/Users/s0r0qw6/model-py-java"))
+DEFAULT_GATEWAY_MODEL = os.environ.get("TRENDS_LLM_MODEL", "claude-sonnet-4-6")
+DEFAULT_GATEWAY_VERSION = os.environ.get("TRENDS_LLM_MODEL_VERSION", "default")
+
+
+@dataclass
+class LLMResponse:
+    text: str
+    input_tokens: int
+    output_tokens: int
+
+
+class GatewayClientWrapper:
+    """Wraps Element Gateway util_llm_client to match the OpenRouterClient interface."""
+
+    def __init__(self, model: str = DEFAULT_GATEWAY_MODEL, model_version: str = DEFAULT_GATEWAY_VERSION,
+                 temperature: float = 0.1, max_tokens: int = 8192):
+        self.model = model
+        self.model_version = model_version
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        if str(HELPER_DIR) not in sys.path:
+            sys.path.insert(0, str(HELPER_DIR))
+        with contextlib.suppress(ImportError):
+            from dotenv import load_dotenv
+            load_dotenv(HELPER_DIR / ".env", override=False)
+        import util_llm_client
+        util_llm_client.DEFAULT_RETRY_ATTEMPTS = 3
+        self.client = util_llm_client.make_llm_client(
+            model=model,
+            model_version=model_version,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def generate(self, user_prompt: str, system_instruction: str = "",
+                 request_timeout: int = 150) -> LLMResponse:
+        resp = self.client.generate(
+            user_prompt=user_prompt,
+            system_instruction=system_instruction,
+            request_timeout=request_timeout,
+        )
+        return LLMResponse(
+            text=resp.text or "",
+            input_tokens=resp.input_tokens or 0,
+            output_tokens=resp.output_tokens or 0,
+        )
+
+
+def make_backend_client(model: str | None = None, temperature: float = 0.1,
+                        max_tokens: int = 8192) -> Any:
+    """Creates the best available LLM client.
+
+    Prefers internal Walmart Element Gateway (Claude Sonnet 4.6).
+    Falls back to OpenRouterClient if Gateway credentials/helper are unavailable.
+    """
+    use_gateway = os.environ.get("LLM_BACKEND", "gateway").lower() != "openrouter"
+    if use_gateway:
+        try:
+            target_model = model or DEFAULT_GATEWAY_MODEL
+            return GatewayClientWrapper(model=target_model, temperature=temperature, max_tokens=max_tokens)
+        except Exception:
+            pass
+    return OpenRouterClient(model=model, temperature=temperature, max_tokens=max_tokens)
+
 
 class LLM:
     def __init__(self, model: str | None = None,
                  cache_dir: str | Path = "output/llm_cache", max_calls: int = 300,
-                 temperature: float = 0.1, max_tokens: int = 8192):
+                 temperature: float = 0.1, max_tokens: int = 8192,
+                 client: Any | None = None):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_calls, self.calls, self.cached = max_calls, 0, 0
         self.input_tokens = self.output_tokens = 0
         self._lock = threading.Lock()
-        self.client = OpenRouterClient(model=model, temperature=temperature, max_tokens=max_tokens)
-        self.model = self.client.model
+        self.client = client or make_backend_client(model=model, temperature=temperature, max_tokens=max_tokens)
+        self.model = getattr(self.client, "model", model or DEFAULT_GATEWAY_MODEL)
 
     def json(self, prompt: str, system: str, validate: Callable[[Any], Any] | None = None,
              timeout: int = 150) -> Any:

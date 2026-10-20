@@ -37,12 +37,16 @@
   - [4.2 Local Stance, Tone & Argument Inference Flow](#42-local-stance-tone--argument-inference-flow)
   - [4.3 Fine-Tuned Transformer Models](#43-fine-tuned-transformer-models)
   - [4.4 Bot, Astroturf & Inauthentic Coordination Classifier](#44-bot-astroturf--inauthentic-coordination-classifier)
-  - [4.5 Multi-Party Political Pulse & Socio-Religious Cross-Tab Matrix](#45-multi-party-political-pulse--socio-religious-cross-tab-matrix)
-  - [4.6 User Demographics & Sentiment Profiling](#46-user-demographics--sentiment-profiling)
+  - [4.5 Strategic Intelligence & Threat Criticality Multi-Task Model (strategic_mdeberta_v4)](#45-strategic-intelligence--threat-criticality-multi-task-model-strategic_mdeberta_v4)
+  - [4.6 Political Multi-Task Intelligence & Issue Taxonomy](#46-political-multi-task-intelligence--issue-taxonomy)
+  - [4.7 Multi-Party Political Pulse & Socio-Religious Cross-Tab Matrix](#47-multi-party-political-pulse--socio-religious-cross-tab-matrix)
+  - [4.8 User Demographics & Psychological Mindset Profiling](#48-user-demographics--psychological-mindset-profiling)
+  - [4.9 Subterranean Political Undercurrent Scoring](#49-subterranean-political-undercurrent-scoring)
 - [5. Lifecycle Trajectory & Breakout Assessment](#5-lifecycle-trajectory--breakout-assessment)
-  - [5.1 The 10-Stage Lifecycle State Machine](#51-the-10-stage-lifecycle-state-machine)
-  - [5.2 Quantitative Stage Transition Matrix](#52-quantitative-stage-transition-matrix)
+  - [5.1 The Real Lifecycle Decision Tree](#51-the-real-lifecycle-decision-tree)
+  - [5.2 Quantitative Stage Reference](#52-quantitative-stage-reference)
   - [5.3 Controversy & Engagement Scoring Formulations](#53-controversy--engagement-scoring-formulations)
+  - [5.4 Dashboard Build Stage (make_full_dashboard.py)](#54-dashboard-build-stage-make_full_dashboardpy)
 - [6. Persistent Storage & Data Contracts](#6-persistent-storage--data-contracts)
   - [6.1 Relational Schema (SQLite Store)](#61-relational-schema-sqlite-store)
   - [6.2 Intermediate JSON Artifacts](#62-intermediate-json-artifacts)
@@ -98,7 +102,7 @@ flowchart LR
 To overcome these structural limitations, the architecture introduces four foundational engineering pillars:
 
 > 🛡️ **Pillar 1: Curated Sentinel Account Panel**
-> Tracks 63 diverse Indian accounts across politics, regional journalism, satire, and civil society configured in [config/panel.json](config/panel.json). Rather than evaluating raw absolute volume, engagement is normalized against each account's historical median using time-attenuated overperformance baselines.
+> Tracks 262 diverse Indian accounts across politics, regional journalism, satire, and civil society configured in [config/panel.json](config/panel.json). Rather than evaluating raw absolute volume, engagement is normalized against each account's historical median using time-attenuated overperformance baselines.
 
 > ⚡ **Pillar 2: Proactive Anomaly Radar & 1-Hop Entity Probes**
 > Monitors early comment acceleration ($dC/dt \ge 15\text{ comments/hr}$) and ratio shocks ($>3\sigma$ above creator baselines). When a flame post is detected, vernacular named entities are mined directly from early comments to spawn autonomous 1-hop search probes before mainstream news surfaces the topic.
@@ -126,7 +130,7 @@ flowchart TB
         GTRENDS["Google Trends IN"]
         REDDIT["Reddit Discussions<br/>(YARS Rotating UA)"]
         XTRENDS["X Trends IN<br/>(24h Trends24)"]
-        PANEL_ACCTS["Sentinel Panel<br/>(63 Curated Accounts)"]
+        PANEL_ACCTS["Sentinel Panel<br/>(262 Curated Accounts)"]
     end
 
     %% Transport Layer
@@ -144,7 +148,10 @@ flowchart TB
         E5_CLUST["Bi-Encoder Clustering<br/>multilingual-e5-base-v4"]
         DEBERTA_STANCE["Stance Cross-Encoder<br/>mDeBERTa-v3-base-xnli"]
         TONE_SARCASM["Tone & Sarcasm Head<br/>XLM-RoBERTa / m-e5"]
-        BOT_ASTRO["Bot & Astroturf Detector<br/>(5-Shingle Jaccard)"]
+        STRATEGIC_V4["Strategic Neural Classifier v4<br/>mDeBERTa-v3 (Threat, Crit, Auth, Stage)"]
+        BOT_ASTRO["Bot & Astroturf Detector<br/>(5-Shingle Jaccard + Neural Auth)"]
+        POL_MODELS["Political Classifier Suite<br/>(6 Tasks: is_political, cluster, etc.)"]
+        DEMO_MODELS["Demographics & Mindset Suite<br/>(6 Tasks: age, gender, state, etc.)"]
         POL_PULSE["Political Pulse Matrix<br/>(Multi-Party & Socio-Religious)"]
     end
 
@@ -185,15 +192,18 @@ flowchart TB
 
 ### 2.2 Machine Learning Model Registry
 
-The system relies on five fine-tuned and calibrated models stored under the artifacts directory:
+The system relies on fine-tuned transformer checkpoints and calibrated multi-task classifiers stored under the `artifacts/` directory:
 
-| Model Designation | Artifact Path | Base Architecture | Primary Task | Threshold | Headline Validation Metric |
+| Model Designation | Artifact Path | Base Architecture | Primary Task | Threshold / Metric | Headline Validation Metric |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Topic Bi-Encoder v4** | [artifacts/topic-models/multilingual-e5-base-events-real-v4](artifacts/topic-models/multilingual-e5-base-events-real-v4) | `intfloat/multilingual-e5-base` | Event-level semantic embedding, post clustering, off-topic pruning | Cosine distance $\tau = 0.45$ | Relevance ROC-AUC **0.9118**, F1 **0.8379**, Retrieval P@1 **0.9907** |
 | **Civic Pre-Filter** | [artifacts/civic-models/civic-me5-base](artifacts/civic-models/civic-me5-base) | Fine-tuned `m-e5-base` classifier | Pre-filtering non-civic noise (cricket, Bollywood, promos) | Sigmoid probability $\tau = 0.74$ | Test ROC-AUC **0.9635**, F1 **0.8607**, Hard-Negative Accuracy **100%** |
 | **Stance Cross-Encoder v2** | [artifacts/stance-models/stance](artifacts/stance-models/stance) | `mDeBERTa-v3-base-xnli` | Pairwise comment-to-position stance allocation | Position score $\tau = 0.225 - 0.35$ | Macro-F1 **0.7545**, Tamil F1 **0.850**, Telugu F1 **0.922**, Marathi F1 **1.000** |
 | **Tone Classifier v2** | [artifacts/stance-models/tone](artifacts/stance-models/tone) | `xlm-roberta-large` / `m-e5` | 4-class tone prediction (`supportive`, `critical`, `humorous`, `neutral`) | Argmax classification | Test Accuracy **0.7717**, Macro-F1 **0.7481**, Sarcasm F1 **0.564** |
-| **Demographics Engine** | [artifacts/demographics_models/metadata.json](artifacts/demographics_models/metadata.json) | Calibrated scikit-learn ensemble | User age bracket, gender inference, and mental sentiment state | Softmax confidence $\ge 0.50$ | Balanced multi-class demographic profiles |
+| **Political Classifier Suite** | `artifacts/political_models/` | Multi-task fine-tuned `mDeBERTa-v3` & calibrated classifiers | `is_political`, `issue_cluster`, `sentiment`, `target`, `direction`, `narrative_type` | Softmax probability $\ge 0.50$ | 6 active models covering 13 civic taxonomies & multi-party targets |
+| **Party Support Transformer** | [artifacts/demographics_models/bert-party-support](artifacts/demographics_models/bert-party-support) | Fine-tuned `microsoft/mdeberta-v3-base` with Supervised Contrastive Loss | 7-class party alignment (`BJP`, `Congress`, `AAP`, `TMC`, `SP`, `DMK`, `None`) | Argmax classification | Held-out Accuracy **82.03%**, Macro-F1 **0.8244**, trained on 4x A100 GPU VM |
+| **Strategic Multi-Task v4** | [artifacts/strategic_models/strategic_mdeberta_v4](artifacts/strategic_models/strategic_mdeberta_v4) | `microsoft/mdeberta-v3-base` with Ordinal Distance Loss | 4 Joint Tasks: Threat Axis (8 cls), Criticality (4 ord cls), Authenticity (3 cls), Trajectory Stage (5 ord cls) | Multi-head argmax + probability calibration | Held-out 2,285-sample Gold Benchmark: **93.3%** Axis Acc (F1 **0.932**), **95.5%** Auth Acc (F1 **0.953**), **72.4%** Crit Acc (MAE **0.29**), Composite F1 **0.8337** |
+| **Demographics & Mindset Suite** | `artifacts/demographics_models/` | Calibrated Multi-Class & neural ensembles | `age`, `gender`, `mental_state` (6 archetypes), `impatience`, `irrationality`, `party_support` | Softmax probability $\ge 0.50$ | 6 active models for behavioral & demographic profiling |
 
 ### 2.3 Codebase Map & Subsystem Responsibilities
 
@@ -208,15 +218,25 @@ The codebase in the source directory strictly enforces separation of concerns:
 | [src/identify_what_matters/civic_classifier.py](src/identify_what_matters/civic_classifier.py) | Lightweight transformer pre-filter tagging posts with civic and governance probabilities. |
 | [src/identify_what_matters/encoder.py](src/identify_what_matters/encoder.py) | Bi-encoder inference wrapper for 768-dimensional E5 symmetric embeddings and agglomerative clustering. |
 | [src/identify_what_matters/stance.py](src/identify_what_matters/stance.py) | Cross-encoder inference, regex noise suppression, and like-weighted stance aggregation. |
-| [src/identify_what_matters/bot_detector.py](src/identify_what_matters/bot_detector.py) | 5-shingle Jaccard copypasta clustering and synthetic account risk scoring. |
+| [src/identify_what_matters/bot_detector.py](src/identify_what_matters/bot_detector.py) | 5-shingle Jaccard copypasta clustering, synthetic account risk scoring, and deep neural authenticity/astroturf probability fusion. |
+| [src/identify_what_matters/strategic_classifier.py](src/identify_what_matters/strategic_classifier.py) | Multi-task strategic intelligence neural classifier (`strategic_mdeberta_v4`) predicting threat axis, criticality score, authenticity, and trajectory stage. |
+| [src/identify_what_matters/political_classifier.py](src/identify_what_matters/political_classifier.py) | Model loader, caching, and inference for the 6 political classification tasks. |
 | [src/identify_what_matters/political_pulse.py](src/identify_what_matters/political_pulse.py) | Bilingual partisan lexicon matching and socio-religious community cross-tabulation. |
-| [src/identify_what_matters/demographics.py](src/identify_what_matters/demographics.py) | Author profile parser and ML classifier predicting age, gender, and sentiment state. |
-| [src/identify_what_matters/instagram_access.py](src/identify_what_matters/instagram_access.py) | Deterministic abstraction over Instagram Private API, Mock replay, and WebSocket Browser Bridge. |
+| [src/identify_what_matters/political_evidence.py](src/identify_what_matters/political_evidence.py) | Deep comment audit extracting party favorability evidence and verbatim quotes. |
+| [src/identify_what_matters/demographics.py](src/identify_what_matters/demographics.py) | Author profile parser and ML classifier predicting age, gender, regional origin, and mental state. |
+| [src/identify_what_matters/undercurrent_scoring.py](src/identify_what_matters/undercurrent_scoring.py) | Composite ranking of subterranean political friction from volume, bot ratio, sentiment, and neural threat criticality boost. |
+| [src/identify_what_matters/emergent_narrative_discovery.py](src/identify_what_matters/emergent_narrative_discovery.py) | Autonomous discovery of candidate issue clusters exceeding current taxonomy. |
+| [src/identify_what_matters/account_discovery.py](src/identify_what_matters/account_discovery.py) | Proposes high-overperformance discovered accounts for inclusion into the sentinel panel. |
+| [src/identify_what_matters/instagram_access.py](src/identify_what_matters/instagram_access.py) | `HikerTransport` (hosted Hiker API, token-based) for collection and `ReplayTransport` for deterministic offline measurement of saved captures. |
+| [src/identify_what_matters/hiker_client.py](src/identify_what_matters/hiker_client.py) | `HikerCollector` wraps `hikerapi.Client` with request budgeting, error taxonomy (`ItemUnavailable` vs. `CollectionAborted`), and automatic `taken_at` ISO-string parsing. |
 | [src/identify_what_matters/sources.py](src/identify_what_matters/sources.py) | Public data collectors: Google News RSS (10 languages), Google Trends, X Trends, and Reddit YARS. |
+| [src/identify_what_matters/political_corpus.py](src/identify_what_matters/political_corpus.py) | CLI (`generate`, `label-real`, `build`) for the 6-task political training corpus — 16 domains (14 issue clusters + 2 non-political controls), synthetic + real-labelled rows, saved to `artifacts/political_corpus/`. |
+| [src/identify_what_matters/political_corpus_trainer.py](src/identify_what_matters/political_corpus_trainer.py) | CPU baseline & ensemble trainer: calibrated multi-task classifiers per task; reads `artifacts/political_corpus/dataset/{train,dev,test}.jsonl`; saves to `artifacts/political_models/`. |
+| [src/identify_what_matters/political_corpus_finetune.py](src/identify_what_matters/political_corpus_finetune.py) | GPU VM fine-tune spec (`train` + `evaluate` commands) for `microsoft/mdeberta-v3-base` or `intfloat/multilingual-e5-base`; run on A100 GPU infrastructure with Supervised Contrastive Loss. |
 | [src/identify_what_matters/emergence.py](src/identify_what_matters/emergence.py) | Longitudinal topic vector tracking and lifecycle state transitions in SQLite. |
 | [src/identify_what_matters/openrouter.py](src/identify_what_matters/openrouter.py) | Direct HTTP client for OpenRouter models with JSON schema enforcement and reasoning budget support. |
 | [src/identify_what_matters/llm.py](src/identify_what_matters/llm.py) | SHA-256 disk caching, retries, and structural validation for LLM prompts. |
-| [config/panel.json](config/panel.json) | 63 curated sentinel accounts across Indian regional news, politics, satire, and civic rights. |
+| [config/panel.json](config/panel.json) | 262 curated sentinel accounts across Indian regional news, politics, satire, and civic rights. |
 | [config/discovery.json](config/discovery.json) | Discovery endpoints, rate-limit policies, and HTTP header profiles. |
 
 ---
@@ -270,7 +290,7 @@ flowchart TD
 2. **Reddit Signal Discovery**: Pulls discussion threads from key Indian subreddits using rotating user agents via the YARS module.
 3. **Prior-Capture Radar Pre-Scan**: Evaluates whether accounts in the previous run's capture entered late-stage breakout, promoting them to the front of the probe queue.
 4. **Generic Hashtag Filter**: Uses compiled regex in [src/identify_what_matters/discussions.py](src/identify_what_matters/discussions.py) to remove non-informative tags (`#trending`, `#viral`, `#foryou`, `#explore`, `#india`) so API budgets target story-specific keywords.
-5. **Output**: Writes planned topics and optimized 1–2 word search queries to [output/runs/20261004T131104Z/plan.json](output/runs/20261004T131104Z/plan.json).
+5. **Output**: Writes planned topics and optimized 1–2 word search queries to [output/runs/20261007T160056Z/plan.json](output/runs/20261007T160056Z/plan.json).
 
 ---
 
@@ -287,7 +307,7 @@ flowchart TD
         direction TB
         PLAN_IN[("plan.json<br/>(from Phase 1)")] --> PROBES["Execute Keyword & Tag Probes"]
 
-        PANEL_CFG["config/panel.json<br/>(63 Curated Sentinel Accounts)"] --> FEEDS["Fetch Sentinel Feeds<br/>(12 Latest Posts per Account)"]
+        PANEL_CFG["config/panel.json<br/>(262 Curated Sentinel Accounts)"] --> FEEDS["Fetch Sentinel Feeds<br/>(12 Latest Posts per Account)"]
         BASE_DB[("trends.sqlite<br/>account_baselines")] -.-> SCO_PAN["Compute Overperformance<br/>& Ratio Shocks"]
         FEEDS --> SCO_PAN
 
@@ -309,7 +329,7 @@ flowchart TD
 #### Analytical Lanes:
 
 ##### Lane A — Sentinel Account Panel & Baseline Normalization
-The sentinel panel in [config/panel.json](config/panel.json) monitors 63 verified accounts. Because follower counts vary by orders of magnitude, post engagement is evaluated using time-attenuated overperformance:
+The sentinel panel in [config/panel.json](config/panel.json) monitors 262 verified accounts (batched dynamically across runs, e.g. 100 accounts per run). Because follower counts vary by orders of magnitude, post engagement is evaluated using time-attenuated overperformance:
 
 $$\text{over}_c = \frac{c + 5}{\tilde{c}_{acct} \cdot w(a) + 5}$$
 
@@ -336,7 +356,7 @@ Trending terms from X (Trends24 24-hour window) and planned queries are searched
 
 ### 3.3 Phase 3 — Measure (Deterministic Replay & Local ML)
 
-Phase 3 operates entirely offline via `ReplayTransport`, reading [output/runs/20261004T131104Z/instagram_capture.json](output/runs/20261004T131104Z/instagram_capture.json) without opening live network connections to Instagram.
+Phase 3 operates entirely offline via `ReplayTransport`, reading [output/runs/20261007T160056Z/instagram_capture.json](output/runs/20261007T160056Z/instagram_capture.json) without opening live network connections to Instagram.
 
 ```mermaid
 flowchart TD
@@ -344,7 +364,7 @@ flowchart TD
         direction TB
         CAP_IN[("instagram_capture.json")] --> REPLAY["ReplayTransport<br/>(Deterministic Offline Replay)"]
         REPLAY --> BASE_UPDATE["Update account_baselines<br/>in trends.sqlite"]
-        REPLAY --> POOL["Pool Fresh Media (&le; 72h)"]
+        REPLAY --> POOL["Pool Fresh Media (&le; 168h / 7d)"]
 
         POOL --> CIVIC_FILTER["Civic Relevance Classifier<br/>civic-me5-base (&tau;=0.74)<br/>Prunes ads, cricket, celebrity gossip"]
         CIVIC_FILTER --> CAP_ENRICH["Caption Enrichment Fallback:<br/>If caption < 20 chars, append top comments"]
@@ -368,20 +388,19 @@ flowchart TD
 
         LLM_BRIEF --> LOCAL_ENGINE["Local Stance & Tone Engine:<br/>- mDeBERTa-v3 cross-encoder (&tau;=0.225-0.35)<br/>- XLM-R / m-e5 4-class tone<br/>- Indic sarcasm heuristics<br/>- Like-weighted stance shares"]
 
-        LOCAL_ENGINE --> BOT_ENGINE["BotAstroturfDetector:<br/>5-shingle Jaccard clustering + handle risk"]
-        BOT_ENGINE --> PULSE_ENGINE["PoliticalPulseEngine:<br/>Partisan favorability + 5 community lenses"]
-
-        PULSE_ENGINE --> METRICS["Calculate Analytical Metrics:<br/>debate_score, trend_score, civic_score"]
-        METRICS --> LIFECYCLE["Lifecycle Assessment:<br/>undercurrent &rarr; spark &rarr; pre_breakout &rarr; peak_debate"]
+        LOCAL_ENGINE --> METRICS["Calculate Analytical Metrics:<br/>debate_score, trend_score, civic_score"]
+        METRICS --> LIFECYCLE["Lifecycle Assessment (breakout_assessment):<br/>quiet/simmering &rarr; pre_breakout &rarr; breaking_out &rarr; peak &rarr; saturated &rarr; settled<br/>(see &sect;5 for the real decision rule)"]
         LIFECYCLE --> HIST_LINK["Topic Identity Matching:<br/>Cosine centroid link in trends.sqlite"]
 
         HIST_LINK --> DB_PERSIST[("trends.sqlite<br/>runs, topics, observations")]
-        HIST_LINK --> OUT_REPORTS[("Final Deliverables<br/>report.md • report.json • dashboard.html")]
+        HIST_LINK --> OUT_REPORTS[("report.md &amp; report.json<br/>(report.json is the dashboard builder's only input)")]
     end
 
     classDef store fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46;
     class DB_PERSIST,OUT_REPORTS store;
 ```
+
+`BotAstroturfDetector` and `PoliticalPulseEngine` are **not** part of this `trends.py` pipeline run — they execute later, at dashboard-build time, inside the separate `make_full_dashboard.py` script. See §5.4.
 
 ---
 
@@ -502,17 +521,83 @@ flowchart TD
 #### Analytical Components:
 1. **5-Shingle Jaccard Clustered Coordination**: Breaks text into overlapping 5-character shingles. When distinct accounts publish comments with Jaccard similarity $\ge 0.78$, they are flagged as coordinated broadcast nodes.
 2. **Handle Metadata Profiling**: Evaluates zero-post status, asymmetric follow ratios, and algorithmic username patterns (e.g., `@user_91823741`).
-3. **Astroturf Index ($0 - 100$)**: Aggregates duplication volume, bot comment proportions, and temporal concentration into a single metric for dashboard alerts.
+3. **Deep Neural Authenticity Fusion**: Integrates continuous `neural_astroturf_prob` and categorical predictions from `strategic_mdeberta_v4` directly into comment-level risk scores. This catches semantic paraphrasing that escapes lexical shingling.
+4. **Astroturf Index ($0 - 100$)**: Aggregates duplication volume, bot comment proportions, and temporal concentration into a single metric for dashboard alerts.
 
 ---
 
-### 4.5 Multi-Party Political Pulse & Socio-Religious Cross-Tab Matrix
+### 4.5 Strategic Intelligence & Threat Criticality Multi-Task Model (`strategic_mdeberta_v4`)
 
-The engine in [src/identify_what_matters/political_pulse.py](src/identify_what_matters/political_pulse.py) tracks partisan leaning and community impact:
+- **Location**: [artifacts/strategic_models/strategic_mdeberta_v4](artifacts/strategic_models/strategic_mdeberta_v4)
+- **Source Code**: [src/identify_what_matters/strategic_classifier.py](src/identify_what_matters/strategic_classifier.py), [scripts/train_strategic_v4_vm.py](scripts/train_strategic_v4_vm.py)
+- **Base Architecture**: `microsoft/mdeberta-v3-base` with unified multi-task projection heads and `ContextPooler`.
+- **Training Harness & GPU Infrastructure**: Fine-tuned on Google Cloud `a2-ultragpu-4g` ($4\times$ NVIDIA A100-SXM4-80GB, 56 vCPUs, 960 GB RAM).
+- **Dataset Scale**:
+  - **Training Corpus**: 3,409 multilingual and code-mixed Indian civic discourse samples across 20 distinct real-world governance scenarios.
+  - **Gold Standard Benchmark**: 2,285 balanced, human/adversarially verified held-out samples.
+- **Novel Loss Formulation (Ordinal Distance Penalty)**:
+  For ordinal tasks (Criticality: low $\to$ medium $\to$ high $\to$ critical; Trajectory: pre_breakout $\to$ breaking_out $\to$ peak_saturation $\to$ simmering_entropy $\to$ settling_quiet), standard categorical cross-entropy fails because it treats a mistake between `low` and `medium` identically to a mistake between `low` and `critical`. In v4, we introduce the **Ordinal Distance Loss**:
+  $$\mathcal{L}_{\text{ordinal}} = \mathcal{L}_{\text{CE}}(\hat{y}, y) + \alpha \cdot \sum_{k=0}^{K-1} \hat{p}_k \cdot |k - y|$$
+  This mathematically penalizes extreme distance errors far more heavily than adjacent class confusions.
+- **Four Joint Prediction Heads**:
+  1. **Threat Axis (8 classes)**: `institutional_integrity`, `public_safety_crisis`, `economic_distress`, `youth_campus_agitation`, `communal_regional_faultline`, `infrastructure_governance_failure`, `disinformation_rumor_panic`, `general_civic_deliberation`. Trained with Focal Loss ($\gamma = 1.5$) to prevent dominant class collapse.
+  2. **Criticality Level (4 ordinal classes)**: `low`, `medium`, `high`, `critical`.
+  3. **Authenticity / Astroturf (3 classes)**: `organic`, `astroturf`, `bot_spam`.
+  4. **Trajectory Lifecycle Stage (5 ordinal classes)**: `pre_breakout`, `breaking_out`, `peak_saturation`, `simmering_entropy`, `settling_quiet`.
+- **Benchmark Evaluation Results on 2,285 Held-Out Gold Standard Samples**:
+  - **Threat Axis Accuracy**: **93.3%** (Macro-F1: **0.932**)
+  - **Authenticity Accuracy**: **95.5%** (Macro-F1: **0.953**)
+  - **Criticality Accuracy**: **72.4%** (Macro-F1: **0.737**, Mean Absolute Rank Error: **0.29**)
+  - **Trajectory Stage Accuracy**: **65.6%** (Macro-F1: **0.663**, Mean Absolute Rank Error: **0.48**)
+  - **Composite Multi-Task F1**: **0.8337** (up from zero-shot baseline of 0.079)
+
+---
+
+### 4.6 Political Multi-Task Intelligence & Issue Taxonomy
+
+The political intelligence subsystem in [src/identify_what_matters/political_classifier.py](src/identify_what_matters/political_classifier.py) and [src/identify_what_matters/political_corpus.py](src/identify_what_matters/political_corpus.py) executes 6 calibrated classification tasks over topics and comments using specialized models stored in `artifacts/political_models/`:
+
+```mermaid
+flowchart TD
+    TEXT["Topic / Headline / Raw Comment Text"] --> POL_CHECK{"Task 1: is_political<br/>(is_political_classifier.joblib)"}
+    POL_CHECK -- False --> NON_POL["Classified Non-Political / General Interest"]
+    POL_CHECK -- True --> MULTI["5-Task Political Deep-Dive Ensemble"]
+
+    MULTI --> CLUST["Task 2: issue_cluster<br/>(13 Civic Taxonomies)"]
+    MULTI --> SENT["Task 3: sentiment<br/>(positive / neutral / negative / conflict)"]
+    MULTI --> TGT["Task 4: target<br/>(government / bjp / opposition / institutions / etc.)"]
+    MULTI --> DIR["Task 5: direction<br/>(pro-incumbent / anti-incumbent / neutral)"]
+    MULTI --> NARR["Task 6: narrative_type<br/>(grievance / reform / corruption / rights / identity)"]
+
+    classDef tStyle fill:#f8fafc,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
+    class POL_CHECK,MULTI,CLUST,SENT,TGT,DIR,NARR tStyle;
+```
+
+#### The 13 Civic Issue Taxonomies:
+The taxonomy categorizes the core governance or civic driver of debate:
+1. `corruption_integrity` — Scams, bribery, institutional capture, ED/CBI probes.
+2. `economic_hardship` — Price rise, inflation, LPG, fuel, cost of living.
+3. `unemployment_jobs` — Paper leaks, youth jobs, railway recruitments, contractual labor.
+4. `welfare_delivery` — Direct transfers, rationing, Ladli Behna, free electricity, guarantees.
+5. `infrastructure_civic` — Floods, potholes, road collapse, railway accidents, airport roofs.
+6. `law_and_order` — Crime, encounter politics, gang violence, police brutality.
+7. `women_safety` — Crimes against women, hospital safety, street harassment.
+8. `social_justice` — Caste census, reservation, sub-categorization, tribal land rights.
+9. `religious_cultural` — Mandir/Masjid disputes, Waqf bill, conversions, dietary rules.
+10. `education_health` — NEET, school syllabus reforms, government hospital crises.
+11. `governance_friction` — Governor vs. State, federal fund allocation, delimitation.
+12. `environment_climate` — Air quality index (AQI), heatwaves, water crisis, industrial spills.
+13. `national_security` — Border tensions, defense procurement, espionage arrests.
+
+---
+
+### 4.7 Multi-Party Political Pulse & Socio-Religious Cross-Tab Matrix
+
+The engine in [src/identify_what_matters/political_pulse.py](src/identify_what_matters/political_pulse.py) and [src/identify_what_matters/political_evidence.py](src/identify_what_matters/political_evidence.py) evaluates alignment across electoral factions and demographics:
 
 ```mermaid
 flowchart LR
-    COMM["Verified Topic Comments"] --> ENTITY_PARSER["Bilingual Partisan Lexicon Parser<br/>(Hindi & English Political Catchphrases)"]
+    COMM["Verified Topic Comments"] --> ENTITY_PARSER["Bilingual Partisan Lexicon & Models<br/>(Target, Direction & Slogans)"]
     COMM --> REL_PARSER["Socio-Religious Community Lexicon<br/>(Cultural, Script & Linguistic Tokens)"]
 
     ENTITY_PARSER --> FAV_CALC["Like-Weighted Favorability Calculation:<br/>BJP/NDA vs. Opposition (INC/AAP/SP/TMC)"]
@@ -528,54 +613,86 @@ flowchart LR
    $$\text{Favorability}_{\text{BJP}} = \frac{\sum_{i \in \text{BJP Support}} w_i + \sum_{j \in \text{Opp Critique}} w_j}{\sum_{\text{all}} w_k}$$
    $$\text{Favorability}_{\text{Opp}} = \frac{\sum_{i \in \text{Opp Support}} w_i + \sum_{j \in \text{BJP Critique}} w_j}{\sum_{\text{all}} w_k}$$
 2. **Socio-Religious Cross-Tabulation**: Evaluates alignment across five cultural-linguistic cohorts (`hindu`, `muslim`, `sikh`, `christian`, `secular_civic`) using calibrated Indic token dictionaries.
+3. **Audit Evidence & Quotes**: [src/identify_what_matters/political_evidence.py](src/identify_what_matters/political_evidence.py) extracts direct, representative quotes for BJP support, BJP critique, Opposition support, and Opposition critique.
 
 ---
 
-### 4.6 User Demographics & Sentiment Profiling
+### 4.8 User Demographics & Psychological Mindset Profiling
 
-The demographics module in [src/identify_what_matters/demographics.py](src/identify_what_matters/demographics.py) extracts aggregate audience profiles:
-- **Age Bracket Classifier**: Rules and scikit-learn models in [artifacts/demographics_models/age_classifier.joblib](artifacts/demographics_models/age_classifier.joblib) segment users into `13-17`, `18-24`, `25-34`, and `35+`.
-- **Gender Inference**: Bio analysis and ensemble models in [artifacts/demographics_models/gender_classifier.joblib](artifacts/demographics_models/gender_classifier.joblib) infer gender cues.
-- **Mental Sentiment State**: Identifies expressions of anxiety, celebration, frustration, or optimism via [artifacts/demographics_models/mental_state_classifier.joblib](artifacts/demographics_models/mental_state_classifier.joblib).
+The demographics module in [src/identify_what_matters/demographics.py](src/identify_what_matters/demographics.py) combines conversational linguistic markers with 6 scikit-learn models in `artifacts/demographics_models/`:
+- **Age Cohorts**: Combines lexical markers (Gen-Z slang, professional terms, civic/mature tokens) with [artifacts/demographics_models/age_classifier.joblib](artifacts/demographics_models/age_classifier.joblib) (`18-24`, `25-34`, `35-54`, `55+`).
+- **Gender Personas**: Lexical conversational markers + [artifacts/demographics_models/gender_classifier.joblib](artifacts/demographics_models/gender_classifier.joblib) (`Female Persona`, `Male Persona`, `Neutral / Topic-Centered`).
+- **Psychological Archetypes / Mental State**: Inferred by [artifacts/demographics_models/mental_state_classifier.joblib](artifacts/demographics_models/mental_state_classifier.joblib) across 6 active mental states (e.g., Cynical Skepticism, Institutional Grievance, Polarized Outrage, Aspirational Nationalism).
+- **Behavioral Indices**: Evaluates `impatience` and `irrationality` metrics from comment syntax and emotional punctuation.
+- **Regional Footprint**: Geographic entity matching maps comments to Indian states and regional linguistic zones.
+
+---
+
+### 4.9 Subterranean Political Undercurrent Scoring
+
+Implemented in [src/identify_what_matters/undercurrent_scoring.py](src/identify_what_matters/undercurrent_scoring.py), this engine ranks the intensity of subterranean political friction that may not have erupted into mainstream press headlines:
+
+$$\text{undercurrent\_score} = \alpha \cdot \text{virality} + \beta \cdot \text{controversy} + \gamma \cdot \text{ideological\_friction} + \lambda \cdot \text{neural\_crit\_boost} - \delta \cdot \text{bot\_penalty}$$
+
+Where:
+- $\text{neural\_crit\_boost}$ is derived directly from `strategic_mdeberta_v4`:
+  $$\text{neural\_crit\_boost} = 1.8 \times \text{criticality\_score} \times \left(1.0 + 0.4 \times \mathbb{I}[\text{threat\_axis} \in \{\text{public\_safety}, \text{institutional}, \text{communal}, \text{disinfo}\}]\right)$$
+- $\text{bot\_penalty}$ is modulated by both Jaccard coordination and deep neural astroturf detection.
+
+Topics with elevated undercurrent scores but low mainstream media presence (`publishers < 2`) are surfaced as priority grassroots alerts on the dashboard.
 
 ---
 
 ## 5. Lifecycle Trajectory & Breakout Assessment
 
-### 5.1 The 10-Stage Lifecycle State Machine
+### 5.1 The Real Lifecycle Decision Tree
 
-Every detected topic is tracked across successive runs, transitioning through an empirical 10-stage lifecycle finite-state machine:
+> **This documents `breakout_assessment()` in [src/identify_what_matters/proactive_radar.py](src/identify_what_matters/proactive_radar.py), enhanced to support sustained multi-day civic and political debates.**
+
+Civic debates in India (e.g. Supreme Court verdicts, regulatory disputes, campus protests, or legislative sessions) frequently unfold over 3 to 14 days. Rather than dropping posts after 3 days or declaring an active debate `settled` whenever posts are older than 24h, the engine evaluates evidence across a **7-day (168h)** horizon.
+
+Every run, for every topic, `breakout_assessment(topic, reference)` inspects on-topic Instagram posts within 168 hours and computes one stage fresh:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> undercurrent: High regional comments, 0 news articles
-    undercurrent --> spark: Velocity spike (dC/dt &ge; 15/hr)
-    spark --> pre_breakout: Sustained ratio lift, 0 press
-    spark --> flame: Extreme shock (dC/dt &ge; 30/hr, ratio &ge; 3.0&sigma;)
-    flame --> breaking_out: Rapid spread across accounts
-    pre_breakout --> breaking_out: Cross-account spread (&ge;3 handles in <6h)
-    breaking_out --> rising: Multi-platform coverage expansion
-    rising --> peak_debate: Max velocity & balanced split (1 - |s1-s2| &ge; 0.6)
-    peak_debate --> saturated: Picked up by &ge;5 newsrooms
-    saturated --> cooling: Velocity drops < 25% of peak
-    cooling --> settled: Inactive > 24 hours
-    settled --> [*]
+flowchart TD
+    START["Topic's Instagram posts<br/>(on-topic media only, &le;168h / 7d old)"] --> HAS_POSTS{Any post &le;168h old?}
+    HAS_POSTS -- no --> QUIET["quiet<br/>(no evidence in 7 days; score 0)"]
+    HAS_POSTS -- yes --> AGE_CHECK{Newest post age &le; 48h<br/>OR active multi-day debate?}
+
+    AGE_CHECK -- no --> SETTLED["settled<br/>(debate concluded, inactive >48h)"]
+    AGE_CHECK -- yes --> PUB5{Publishers &ge;5?}
+    PUB5 -- yes --> SATURATED["saturated"]
+    PUB5 -- no --> PUB3{Publishers &ge;3,<br/>or 8+ accounts posted in 24h?}
+    PUB3 -- yes --> PEAK["peak"]
+    PUB3 -- no --> SPREAD{"3+ accounts posted in 6h,<br/>or (3+ in 24h and half of those were in 6h)?"}
+    SPREAD -- yes --> BREAKING["breaking_out"]
+    SPREAD -- no --> YOUNG{"Newest &le;12h AND<br/>(over-perf &ge;2x, or comment:like lift &ge;1.5x,<br/>or &ge;30 comments/h, or heat up &ge;30% vs. last run)?"}
+    YOUNG -- yes --> PRE["pre_breakout"]
+    YOUNG -- no --> SIMMERING["simmering<br/>(active debate / ongoing multi-day discussion)"]
 ```
 
-### 5.2 Quantitative Stage Transition Matrix
+A metrics-only `measure` run (`--metrics-only`, no fresh LLM brief) that captured **zero** Instagram posts at all for a topic is forced to a ninth pseudo-stage, `unobserved`, in `trends.py` rather than calling `breakout_assessment()` (there is nothing to assess). `quiet` and `unobserved` therefore both mean "no stage evidence," for two different reasons: `quiet` = posts exist but are all older than 168h (7 days); `unobserved` = collection never captured any post for this topic this run.
 
-| Stage Identifier | Formal Designation | Quantitative Detection Criteria | Information Asymmetry Dynamic |
-| :--- | :--- | :--- | :--- |
-| **`undercurrent`** | Simmering Undercurrent | Comments $>50$, regional panel presence, $0$ RSS articles. | High grassroots debate; completely invisible to newsrooms. |
-| **`spark`** | Initial Ignition | $dC/dt \ge 15\text{ comments/hr}$ on a single creator account. | Localized viral momentum begins. |
-| **`flame`** | Flame Anomaly | $dC/dt \ge 30\text{ comments/hr}$ and ratio lift $\ge 3.0\sigma$ above creator baseline. | Extreme engagement shock; sharp emotional polarization. |
-| **`pre_breakout`** | Pre-Breakout | Ratio lift $>2.5\times$ median, comment volume $\ge 100$, $0$ mainstream news publishers. | Debate saturating social feeds; newsrooms unaware. |
-| **`breaking_out`** | Rapid Contagion | Spreads across $\ge 3$ distinct accounts within a 6-hour window; velocity score $>0.75$. | Viral horizontal spread; press wires begin writing. |
-| **`rising`** | Broadening Momentum | Multi-platform footprint across Instagram, Reddit, and initial digital news publishers. | Story gaining mainstream digital momentum. |
-| **`peak_debate`** | Peak Polarization | Highest engagement per hour; split stance balance ($1 - \|s_1 - s_2\| \ge 0.60$). | National primetime focus; official spokespeople involved. |
-| **`saturated`** | News Saturated | Covered by $\ge 5$ national news publishers; social comments shift to repetitive reactions. | Editorial consensus formed; organic debate slowing. |
-| **`cooling`** | Decelerating Interest | Engagement velocity drops below 25% of peak ($dC/dt < 5/\text{hr}$). | Attention migrating toward newer breaking stories. |
-| **`settled`** | Settled / Archived | Zero new posts and negligible comment velocity for $>24\text{ hours}$. | Story lifecycle completed; persisted to longitudinal archive. |
+Because this is recomputed from current evidence every run rather than transitioned, a topic's *history* of stages (visible run-over-run) usually looks like `quiet/simmering &rarr; pre_breakout &rarr; breaking_out &rarr; peak &rarr; saturated &rarr; simmering (multi-day) &rarr; settled` as its own posts age and spread.
+
+**To find topics that have not settled yet** (i.e. still worth watching): every stage except `settled` and `quiet`/`unobserved`. The dashboard's Topics tab Stage filter exposes these values.
+
+### 5.2 Quantitative Stage Reference
+
+| Stage | Meaning | Exact condition in `breakout_assessment()` |
+| :--- | :--- | :--- |
+| **`quiet`** | No stage evidence; nothing on-topic in the last 7 days (168h). | `aged` (on-topic posts &le;168h old) is empty. |
+| **`settled`** | Story lifecycle completed or abandoned. | Newest on-topic post's age `> 48h`, or `> 24h` without ongoing multi-day debate evidence (`aged < 3` and low engagement). |
+| **`saturated`** | Editorial consensus formed; organic debate slowing. | Newest post &le;24h old, and `publishers >= 5`. |
+| **`peak`** | Broad coverage or wide account spread. | Not saturated; `publishers >= 3` **or** `authors_24h >= 8`. |
+| **`breaking_out`** | Rapid cross-account contagion. | Not peak/saturated; `authors_6h >= 3` **or** (`authors_24h >= 3` and at least half of the last-24h authors posted within 6h). |
+| **`pre_breakout`** | Early over-performance, newsrooms unaware. | Not breaking out; newest post &le;12h old **and** (over-performance &ge;2x its account's median, **or** comment:like ratio lift &ge;1.5x, **or** &ge;30 comments/hour on posts &le;12h, **or** Instagram heat up &ge;30% vs. the previous run). |
+| **`simmering`** | Active debate: either early without sharp spikes, or sustained multi-day discussions across days 2 to 7. | Fallback when none of the above match, or when multi-day activity continues across 3+ accounts/comments. |
+| **`unobserved`** | Collection captured zero Instagram posts for this topic this run (set in `trends.py`, not by `breakout_assessment()`). | Only reachable in `--metrics-only` runs. |
+
+A numeric `score` (continuous, used for ranking within a stage, not for choosing it) combines over-performance, ratio lift, comment rate, account spread, post recency, reply depth, run-over-run growth, and multi-day engagement momentum, then discounts by publisher count and very high raw comment totals — see the `score = (...)` expression in `breakout_assessment()` for the exact weights.
+
+**A second, independent axis — `status`:** `trends.py:status()` separately classifies each topic as `new` / `emerging` / `rising` / `sustained` / `fading`, purely from the trend-score trajectory across runs (growth vs. the previous run's `trend_score`, Instagram freshness, news freshness). This is report.md's "Status" line and is orthogonal to the lifecycle `stage` above — a topic can be `rising` + `settled` (gaining relative trend score even though its own posts have gone quiet, e.g. pure news/search momentum) or `sustained` + `simmering` (a resilient multi-day civic debate).
 
 ### 5.3 Controversy & Engagement Scoring Formulations
 
@@ -597,6 +714,42 @@ To ensure that bot armies or comment brigades cannot manipulate stance proportio
 $$w_i = 1 + \log(1 + \text{likes}_i)$$
 
 $$\text{Share}(\text{Side}_k) = \frac{\sum_{i \in \text{Side}_k} w_i}{\sum_{j} w_j}$$
+
+### 5.4 Dashboard Build Stage (`make_full_dashboard.py`)
+
+`report.json`/`report.md` are the pipeline's own deliverables; `dashboard.html` is built by a **separate, standalone script**, [make_full_dashboard.py](make_full_dashboard.py), run manually after a `trends.py` run finishes. It is not invoked by `trends.py` and has no CLI flags — it always picks the most-recently-generated `output/runs/*/report.json` and writes `dashboard.html` next to it:
+
+```mermaid
+flowchart TD
+    REPORT[("output/runs/<latest>/report.json\n(topics, scores, breakout, brief, reddit_proxy)")] --> BUILD["make_full_dashboard.py"]
+    COLLECT[("output/runs/<latest>/collect.json\n(signals, availability, transport)")] --> BUILD
+    PANEL[("config/panel.json\n(262 accounts, groups, accounts_per_run)")] --> BUILD
+    REDDIT[("output/reddit_signals.json")] --> BUILD
+    ALL_SIGNALS[("output/runs/*/signals.json\n(all historical runs, for headline&rarr;article provenance)")] --> BUILD
+
+    BUILD --> STRAT["classify_strategic_batch()\nMulti-Task mDeBERTa-v4:\n8-Axis Threat, Criticality & Action Playbook"]
+    BUILD --> DEMO["infer_topic_mental_state()\nper-topic age/gender/mindset/region\n(lexicon + 3 trained joblib classifiers)"]
+    BUILD --> POLITICAL["political_pulse_engine.evaluate_topic_pulse()\nNeural Transformer & Lexicon scoring"]
+    BUILD --> BOT["bot_detector.analyze_topic_astroturf()\nshingle clustering + neural authenticity scoring"]
+    BUILD --> EVIDENCE["political_evidence.audit_comments()\nparty favor/oppose + template repetition"]
+
+    STRAT --> HTML[("dashboard.html\n(single self-contained file with 7 tabs;\nOverview with Early-Warning Radar,\nTopics, Political, Undercurrent, Panel, Political Lens, Reddit)")]
+    DEMO --> HTML
+    POLITICAL --> HTML
+    BOT --> HTML
+    EVIDENCE --> HTML
+
+    classDef store fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46;
+    class REPORT,COLLECT,PANEL,REDDIT,ALL_SIGNALS,HTML store;
+```
+
+Consequences worth knowing before changing either side of this boundary:
+
+- **Strategic intelligence, demographics, political-pulse, bot-detection, and political undercurrent scoring all execute during dashboard generation** — [make_full_dashboard.py](make_full_dashboard.py) loads the fine-tuned `strategic_mdeberta_v4` neural model, 6 political classifiers, and 6 demographic models, evaluating topic briefs and comment pools.
+- **Executive Early-Warning Radar**: [make_full_dashboard.py](make_full_dashboard.py) builds a top-level early-warning command center on the Overview tab and across the Political Lens tab, grouping topics into systemic threat axes and recommending concrete government tactical intervention playbooks.
+- **Dependency on comment pools**: When a run is executed with `--metrics-only` or lacks topic-level comment sampling (`comment_pool: []`), models cannot infer user-level demographics, psychological archetypes, or side-by-side bot astroturf percentages. The dashboard gracefully falls back to category-level and regional proxies, labeling them as estimated/unsampled.
+- The 6 `artifacts/demographics_models/*.joblib` classifiers (`age`, `gender`, `mental_state`, `impatience`, `irrationality`, `party_support`), 6 `artifacts/political_models/*.joblib` classifiers (`is_political`, `issue_cluster`, `sentiment`, `target`, `direction`, `narrative_type`), and `artifacts/strategic_models/strategic_mdeberta_v4` load and evaluate cleanly.
+- `political_classifier.models_available()` and `load_strategic_model()` report the active status of all 7 model families directly to the Undercurrent Intel dashboard tab (7/7 neural & statistical tasks active).
 
 ---
 
@@ -691,12 +844,12 @@ To enable modular debugging, every phase serializes standardized data contracts 
 
 | Artifact Deliverable | Producer Phase | Schema Contents & Structure | Reference Example |
 | :--- | :--- | :--- | :--- |
-| **Plan Manifest** | Phase 1 (Plan) | List of candidate topics, source headline clusters, and prioritized search probe queries. | [output/runs/20261004T131104Z/plan.json](output/runs/20261004T131104Z/plan.json) |
-| **Raw Capture Payload** | Phase 2 (Collect) | Keyed dictionary of every raw HTTP response (user feeds, search results, comment trees). | [output/runs/20261004T131104Z/instagram_capture.json](output/runs/20261004T131104Z/instagram_capture.json) |
-| **Collection Metrics** | Phase 2 (Collect) | Request execution metrics, timestamps, response sizes, and rate-limit summaries. | [output/runs/20261004T131104Z/collect.json](output/runs/20261004T131104Z/collect.json) |
-| **Intelligence Report (JSON)** | Phase 3 (Measure) | Complete analytical output: contested questions, side splits, bot metrics, and audit checks. | [output/runs/20261004T131104Z/report.json](output/runs/20261004T131104Z/report.json) |
-| **Intelligence Brief (Markdown)** | Phase 3 (Measure) | Formatted intelligence briefing document ready for human reading. | [output/runs/20261004T131104Z/report.md](output/runs/20261004T131104Z/report.md) |
-| **Interactive Dashboard** | Post-Processing | Self-contained, responsive 2D visual dashboard generated by [make_full_dashboard.py](make_full_dashboard.py). | [output/runs/20261004T131104Z/dashboard.html](output/runs/20261004T131104Z/dashboard.html) |
+| **Plan Manifest** | Phase 1 (Plan) | List of candidate topics, source headline clusters, and prioritized search probe queries. | [output/runs/20261007T160056Z/plan.json](output/runs/20261007T160056Z/plan.json) |
+| **Raw Capture Payload** | Phase 2 (Collect) | Keyed dictionary of every raw HTTP response (user feeds, search results, comment trees). | [output/runs/20261007T160056Z/instagram_capture.json](output/runs/20261007T160056Z/instagram_capture.json) |
+| **Collection Metrics** | Phase 2 (Collect) | Request execution metrics, timestamps, response sizes, and rate-limit summaries. | [output/runs/20261007T160056Z/collect.json](output/runs/20261007T160056Z/collect.json) |
+| **Intelligence Report (JSON)** | Phase 3 (Measure) | Complete analytical output: contested questions, side splits, bot metrics, and audit checks. | [output/runs/20261007T160056Z/report.json](output/runs/20261007T160056Z/report.json) |
+| **Intelligence Brief (Markdown)** | Phase 3 (Measure) | Formatted intelligence briefing document ready for human reading. | [output/runs/20261007T160056Z/report.md](output/runs/20261007T160056Z/report.md) |
+| **Interactive Dashboard** | Post-Processing | Self-contained, responsive 2D visual dashboard generated by [make_full_dashboard.py](make_full_dashboard.py). | [output/runs/20261007T160056Z/dashboard.html](output/runs/20261007T160056Z/dashboard.html) |
 
 ---
 
@@ -738,7 +891,7 @@ sequenceDiagram
     participant RADAR as Proactive Anomaly Radar
     participant FS as Local Filesystem
 
-    CLI->>DB: Load 63 account historical baselines
+    CLI->>DB: Load sentinel account historical baselines
     CLI->>IG: Fetch sentinel user feeds (latest 12 posts per account)
     IG-->>CLI: Raw account feed posts
     CLI->>CLI: Compute time-attenuated overperformance & ratio lift
@@ -767,7 +920,7 @@ sequenceDiagram
 
     CLI->>FS: Load instagram_capture.json via ReplayTransport
     CLI->>DB: Update account_baselines with settled posts (age >= 6h)
-    CLI->>FS: Pool fresh media posts (age <= 72h)
+    CLI->>FS: Pool fresh media posts (age <= 168h / 7d)
     CLI->>CIV: Score post civic relevance: P(civic/political) >= 0.74
     CIV-->>CLI: Clean civic posts (prunes cricket, ads, celebrity trivia)
     CLI->>CLI: Caption enrichment fallback (append top comments for emoji captions)
@@ -834,9 +987,9 @@ All generative LLM calls route through OpenRouter's public endpoint. The archite
 
 | Operational Phase | Network Status | External Services Contacted | Disk Artifacts Produced |
 | :--- | :--- | :--- | :--- |
-| **`plan`** | Online | Google News RSS, Google Trends, Reddit, OpenRouter API | [output/runs/20261004T131104Z/plan.json](output/runs/20261004T131104Z/plan.json), [output/runs/20261004T131104Z/signals.json](output/runs/20261004T131104Z/signals.json) |
-| **`collect`** | Online / Local | Instagram Platform, X Trends (Trends24) | [output/runs/20261004T131104Z/instagram_capture.json](output/runs/20261004T131104Z/instagram_capture.json), [output/runs/20261004T131104Z/collect.json](output/runs/20261004T131104Z/collect.json) |
-| **`measure`** | Offline / Local | OpenRouter API (Briefing & Audit only), Local Transformers | [output/runs/20261004T131104Z/report.json](output/runs/20261004T131104Z/report.json), [output/runs/20261004T131104Z/report.md](output/runs/20261004T131104Z/report.md), [output/trends.sqlite](output/trends.sqlite) |
+| **`plan`** | Online | Google News RSS, Google Trends, Reddit, OpenRouter API | [output/runs/20261007T160056Z/plan.json](output/runs/20261007T160056Z/plan.json), [output/runs/20261007T160056Z/signals.json](output/runs/20261007T160056Z/signals.json) |
+| **`collect`** | Online / Local | Instagram Platform, X Trends (Trends24) | [output/runs/20261007T160056Z/instagram_capture.json](output/runs/20261007T160056Z/instagram_capture.json), [output/runs/20261007T160056Z/collect.json](output/runs/20261007T160056Z/collect.json) |
+| **`measure`** | Offline / Local | OpenRouter API (Briefing & Audit only), Local Transformers | [output/runs/20261007T160056Z/report.json](output/runs/20261007T160056Z/report.json), [output/runs/20261007T160056Z/report.md](output/runs/20261007T160056Z/report.md), [output/trends.sqlite](output/trends.sqlite) |
 
 #### Privacy by Design:
 - **Zero Handle Leakage**: Personal usernames, phone numbers, and URLs are stripped before sending comment text to LLMs or persisting final briefings.
@@ -844,21 +997,17 @@ All generative LLM calls route through OpenRouter's public endpoint. The archite
 
 ### 8.2 Instagram Transport Adapters
 
-Implemented in [src/identify_what_matters/instagram_access.py](src/identify_what_matters/instagram_access.py), the collection engine supports three interchangeable transport adapters:
+Implemented in [src/identify_what_matters/instagram_access.py](src/identify_what_matters/instagram_access.py), live Instagram collection uses the hosted Hiker API. Saved captures are replayed offline during measurement:
 
 ```mermaid
 flowchart TD
-    CORE["Pipeline Orchestrator<br/>(InstagramAccess Interface)"] --> ADAPTER{Transport Adapter}
-
-    ADAPTER -->|--instagram mock| MOCK["MockTransport<br/>- Replays historical fixture JSONs<br/>- Zero network calls<br/>- Instant local CI/CD execution"]
-    ADAPTER -->|--instagram instagrapi| PRIVATE["InstagrapiTransport<br/>- Headless direct API requests<br/>- Authenticates via INSTAGRAM_SESSION_ID<br/>- Automated background servers"]
-    ADAPTER -->|--instagram browser| BRIDGE["BrowserBridgeTransport<br/>- Proxies requests through active Chrome/Firefox<br/>- DevTools WebSocket client in browser<br/>- Complete immunity to automated IP blocks"]
+    CLI["Pipeline CLI"] -->|--instagram hiker| HIKER["HikerTransport<br/>Hosted Hiker API<br/>HIKERAPI_TOKEN"]
+    HIKER --> CAPTURE["Saved Instagram capture"]
+    CAPTURE -->|offline measurement| REPLAY["ReplayTransport"]
 
     classDef tStyle fill:#f8fafc,stroke:#0284c7,stroke-width:1.5px,color:#0c4a6e;
-    class MOCK,PRIVATE,BRIDGE tStyle;
+    class HIKER,CAPTURE,REPLAY tStyle;
 ```
-
-For the browser bridge mode, inject the helper script [src/identify_what_matters/browser_proxy.js](src/identify_what_matters/browser_proxy.js) into your active browser session.
 
 ---
 
@@ -872,7 +1021,7 @@ The architectural design is grounded in peer-reviewed social computing and NLP l
 | **Engagement Ratios as Proxies for Outrage** | **J. Minot et al.** *Ratioing the President.* PLOS ONE 16(4), 2021. | Established the comment-to-like ratio as an objective indicator of contentious discourse. Provided empirical proof that social engagement follows a 24-hour diurnal cycle, deriving the $w(a)$ time-attenuation formula. |
 | **Network & Comment Structural Controversy** | **K. Garimella et al.** *Quantifying Controversy on Social Media.* ACM Transactions on Social Computing. | Demonstrated that controversy is quantified with greater accuracy from conversation graph structure than raw lexical sentiment. Motivated reply-tree depth metrics in `debate_score`. |
 | **Bursty Stream Automata** | **J. Kleinberg.** *Bursty and Hierarchical Structure in Streams.* KDD 2002. | Infinite-state automaton model for identifying state transitions in continuous social event streams, informing the velocity triggers ($dC/dt \ge 15$). |
-| **Sentinel Panel Representation** | **Z. Tufekci.** *Big Questions for Social Media Big Data.* ICWSM 2014. | Addressed selection bias in firehose streams. Justified maintaining a curated 63-account sentinel panel across regional journalism, satire, and civic rights rather than unanchored keyword streams. |
+| **Sentinel Panel Representation** | **Z. Tufekci.** *Big Questions for Social Media Big Data.* ICWSM 2014. | Addressed selection bias in firehose streams. Justified maintaining a curated 262-account sentinel panel across regional journalism, satire, and civic rights rather than unanchored keyword streams. |
 | **Misinformation Velocity Dynamics** | **S. Vosoughi et al.** *The spread of true and false news online.* Science 2018. | Demonstrated that unverified sensational claims diffuse significantly faster than factual refutations. Directly motivated the automated Caution Flag and LLM Judge Audit subsystems. |
 | **Baseline-Relative Overperformance** | **CrowdTangle Methodology.** *Overperformance Metric Formulation.* | Demonstrated that evaluating social content against an account's own running median eliminates celebrity follower bias and surfaces high-friction regional stories. |
 

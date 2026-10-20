@@ -231,7 +231,7 @@ def identify_proactive_candidates(bundle: dict, reference: datetime,
     for account, items in bundle.get("feeds", {}).items():
         base = baselines.get(account)
         for post in items:
-            if not post.get("taken_at") or post.get("pinned") or post.get("paid"):
+            if not isinstance(post, dict) or not post.get("taken_at") or post.get("pinned") or post.get("paid"):
                 continue
             vel = calculate_velocity_signals(post, reference, base)
             post["proactive_radar"] = vel
@@ -340,23 +340,25 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
     """Where a topic is in its life, from the ages, spread and over-performance of its own posts.
 
     Stages: pre_breakout (young, over-performing, few accounts, no press) -> breaking_out (several accounts
-    joined in the last 6 h) -> peak (broad or covered by press) -> saturated (wide press) / settled (no new
-    posts in 24 h); simmering = active but without early-acceleration evidence.
+    joined in the last 6 h) -> peak (broad or covered by press) -> saturated (wide press) -> simmering (active,
+    ongoing debate over days) -> settled (debate concluded, no recent activity in >48h or low momentum).
     """
     media = topic.get("instagram", {}).get("media", [])
     if topic.get("brief"):
         on_topic = set(topic["brief"].get("on_topic_codes", []))
         media = [m for m in media if m.get("code") in on_topic]
     aged = [(hours_since(m.get("taken_at"), reference), m) for m in media]
-    aged = [(age, m) for age, m in aged if age is not None and age <= 72]
+    aged = [(age, m) for age, m in aged if age is not None and age <= 168]
     if not aged:
         return {"stage": "quiet", "score": 0.0, "reasons": [], "signals": {}}
     young = [m for age, m in aged if age <= 6]
     early = [m for age, m in aged if age <= 12]
     day = [m for age, m in aged if age <= 24]
+    multi_day = [m for age, m in aged if age <= 72]
     newest = min(age for age, _ in aged)
     authors_6h = len({m.get("author_id") for m in young})
     authors_24h = len({m.get("author_id") for m in day})
+    authors_7d = len({m.get("author_id") for _, m in aged})
     max_over = max((m["panel"]["over_comments"] for m in early if m.get("panel")), default=0.0)
     max_lift = max((m["panel"]["ratio_lift"] for m in early if m.get("panel")), default=0.0)
     comment_rate = sum((m.get("comment_count") or 0) / max(age, 0.5) for age, m in aged if age <= 12)
@@ -368,14 +370,23 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
     current = (topic.get("scores") or {}).get("instagram_heat")
     growth = current / previous if previous and current else None
 
+    # Multi-day activity momentum:
+    multiday_momentum = 0.4 * math.log1p(comments_total / 100) + 0.3 * min(authors_7d, 5)
+
     score = (1.2 * math.log1p(max_over) + 0.8 * math.log1p(max(max_lift - 1, 0)) + 0.5 * math.log1p(comment_rate / 10)
              + 0.6 * min(authors_6h, 5) + (1.0 if newest <= 3 else 0.5 if newest <= 6 else 0.0)
-             + 0.5 * math.log1p(replies) + (0.8 * math.log1p(growth - 1) if growth and growth > 1 else 0.0))
+             + 0.5 * math.log1p(replies) + (0.8 * math.log1p(growth - 1) if growth and growth > 1 else 0.0)
+             + multiday_momentum)
     score /= 1 + 0.5 * publishers
     if comments_total > 5000:
         score *= 0.7
 
-    if newest > 24:
+    # Active multi-day debate condition:
+    # If posts exist across multiple days with active participation (>=3 accounts or comments >= 150),
+    # the topic remains an active 'simmering' multi-day debate rather than prematurely 'settled'.
+    has_active_multiday_debate = (len(aged) >= 3 and (authors_7d >= 3 or comments_total >= 150 or replies >= 0.5))
+
+    if newest > 48 or (newest > 24 and not has_active_multiday_debate):
         stage = "settled"
     elif publishers >= 5:
         stage = "saturated"
@@ -387,6 +398,29 @@ def breakout_assessment(topic: dict, reference: datetime) -> dict:
         stage = "pre_breakout"
     else:
         stage = "simmering"
+
+    # Neural trajectory model calibration if topic text is present
+    topic_text = " ".join(filter(None, [topic.get("title"), (topic.get("brief") or {}).get("summary")]))
+    if topic_text.strip():
+        try:
+            from identify_what_matters.strategic_classifier import classify_strategic
+            neural_s = classify_strategic(topic_text)
+            n_stage = neural_s.get("trajectory_stage")
+            n_conf = neural_s.get("trajectory_stage_conf", 0.0)
+            if n_stage and n_conf >= 0.60:
+                stage_map = {
+                    "pre_breakout": "pre_breakout",
+                    "breaking_out": "breaking_out",
+                    "peak_saturation": "saturated" if publishers >= 4 else "peak",
+                    "simmering_entropy": "simmering",
+                    "settling_quiet": "settled"
+                }
+                mapped_stage = stage_map.get(n_stage)
+                if mapped_stage and stage in ("simmering", "quiet", "pre_breakout"):
+                    stage = mapped_stage
+                    reasons.append(f"Strategic neural classifier detected {n_stage.replace('_', ' ')} dynamics ({n_conf:.0%} conf)")
+        except Exception:
+            pass
 
     reasons = [f"newest post {newest:.1f} h old",
                f"{authors_6h} account(s) posted in the last 6 h, {authors_24h} in 24 h"]
