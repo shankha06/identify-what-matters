@@ -173,6 +173,9 @@ def _is_india_relevant(entry: dict) -> bool:
     return bool(_INDIA_RELEVANT_RE.search(entry.get("term", "")))
 
 
+RESERVED_POLITICS_HASHTAGS = 5
+
+
 def _extract_organic_hashtags(bundle: dict, limit: int) -> list[str]:
     """Extract the most-used India-political hashtags from panel captions collected this run.
     Returns up to `limit` lowercase tag strings (no #). Falls back to POLITICS_HASHTAGS to fill gaps."""
@@ -184,14 +187,10 @@ def _extract_organic_hashtags(bundle: dict, limit: int) -> list[str]:
             for tag in re.findall(r"#(\w+)", text.lower()):
                 if len(tag) >= 4 and _INDIA_RELEVANT_RE.search(tag):
                     tag_counts[tag] += 1
+    reserved = [tag.lstrip("#").lower() for tag in POLITICS_HASHTAGS[:RESERVED_POLITICS_HASHTAGS]]
     organic = [tag for tag, _ in sorted(tag_counts.items(), key=lambda x: -x[1])]
-    seen = set(organic)
-    for fallback_tag in POLITICS_HASHTAGS:
-        clean = fallback_tag.lstrip("#").lower()
-        if clean not in seen:
-            organic.append(clean)
-            seen.add(clean)
-    return organic[:limit]
+    fallback = [tag.lstrip("#").lower() for tag in POLITICS_HASHTAGS]
+    return list(dict.fromkeys(reserved + organic + fallback))[:limit]
 
 
 def _build_commenter_overlap(bundle: dict) -> dict:
@@ -207,7 +206,7 @@ def _build_commenter_overlap(bundle: dict) -> dict:
 
 
 async def collect_instagram(plan: dict, transport, reference, panel: dict, terms: list[dict],
-                           panel_comment_posts: int = 100, term_comment_posts: int = 25, seed_hashtags: int = 15,
+                           panel_comment_posts: int = 100, term_comment_posts: int = 25, seed_hashtags: int = 25,
                            baselines: dict[str, dict] | None = None, early_comment_posts: int = 40,
                            comment_posts: int = 3, panel_total_budget: int = 800) -> dict:
     """Every Instagram request of a run, in priority order (budget may end the run early). No LLM calls."""
@@ -339,8 +338,9 @@ async def collect_instagram(plan: dict, transport, reference, panel: dict, terms
         if result:
             bundle["seeds"][tag] = result["media"]
         _done["hashtags"] += 1
+        status = "failed" if result is None else f"{len(result['media'])} posts"
         print(f"[collect] hashtags: {_done['hashtags']}/{len(hashtag_targets)} #{tag}"
-              f" -> {len((result or {}).get('media', []))} posts", flush=True)
+              f" -> {status}", flush=True)
 
     async def _do_probe(topic):
         if not bundle["stopped"]:
