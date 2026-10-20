@@ -96,10 +96,18 @@ class BotAstroturfDetector:
     """Multi-signal statistical & lexical bot / astroturf classifier."""
 
     BOT_PHRASE_PATTERNS = [
+        # English political slogans
         re.compile(r"\b(?:vote for bjp|vote for modi|aayega to modi|ayega to modi|modi sarkar|har har modi|jai shri ram|hindu rashtra)\b", re.I),
         re.compile(r"\b(?:modi chor|evm chor|evm scam|bjp hatao|dictatorship|tanashahi|save constitution|rahul gandhi zindabad|modi resign)\b", re.I),
         re.compile(r"\b(?:boycott\w*|shame on|resign now|toolkit|godi media|pappu|bhakts?|librandus?)\b", re.I),
         re.compile(r"\b(?:100% true|plz share|must watch|viral karo|trend karao|retweet|repost)\b", re.I),
+        # Hindi/Devanagari slogans (script-level matching)
+        re.compile(r"(?:मोदी जी जिंदाबाद|मोदी है तो मुमकिन है|जय श्री राम|भारत माता की जय|हिंदू राष्ट्र|वंदे मातरम्)", re.I),
+        re.compile(r"(?:मोदी चोर|ईवीएम चोरी|बीजेपी हटाओ|तानाशाही|संविधान बचाओ|राहुल गांधी जिंदाबाद)", re.I),
+        re.compile(r"(?:शेयर करो|वायरल करो|ट्रेंड कराओ|सब देखें|जरूर देखें)", re.I),
+        # Hinglish coordination signals
+        re.compile(r"\b(?:jai shree ram|jai sri ram|bharat mata ki jai|vande mataram|modi hai to mumkin hai)\b", re.I),
+        re.compile(r"\b(?:share karo|viral karo|trend karo|sabko batao|must share|must watch|dekho aur share)\b", re.I),
     ]
 
     def evaluate_account_risk(self, comment: dict, is_in_repetition_cluster: bool = False) -> dict:
@@ -117,10 +125,9 @@ class BotAstroturfDetector:
         media_count = user_meta.get("media_count")
         follower_count = user_meta.get("follower_count")
 
-        if media_count == 0 or (media_count is None and not author):
-            # Zero posts or completely anonymous ephemeral handle
+        if media_count == 0:
             score += 0.25
-            reasons.append("zero_or_anonymous_profile")
+            reasons.append("zero_post_profile")
         elif media_count is not None and media_count < 2:
             score += 0.20
             reasons.append("sparse_profile_history")
@@ -128,6 +135,11 @@ class BotAstroturfDetector:
         if follower_count is not None and follower_count < 5:
             score += 0.15
             reasons.append("near_zero_followers")
+
+        # No author ID at all: anonymous ephemeral commenter
+        if not author:
+            score += 0.15
+            reasons.append("anonymous_commenter")
 
         # Signal 2: Repetition cluster membership (copied across multiple accounts)
         if is_in_repetition_cluster:
@@ -145,14 +157,36 @@ class BotAstroturfDetector:
 
         # Signal 4: Repetitive emoji spamming or hashtag spamming
         emojis = re.findall(r"[\U00010000-\U0010ffff]", text)
+        hashtags = re.findall(r"#\w+", text)
         if len(emojis) > 6 and len(text.split()) < 5:
             score += 0.20
             reasons.append("hyper_emoji_spam")
+        elif len(emojis) > 4 and not re.search(r"[a-zA-Zऀ-ॿ]{4}", text):
+            # Emoji-only with no real words (even 4 chars of Hindi/English)
+            score += 0.20
+            reasons.append("emoji_only_comment")
+        if len(hashtags) >= 4:
+            # Hashtag-bomb: mostly tags, no real text
+            score += 0.20
+            reasons.append("hashtag_spam")
 
         # Signal 5: Engagement asymmetry (lots of comments, 0 likes received, 0 replies)
         if likes == 0 and replies == 0 and len(text) > 30:
             score += 0.10
             reasons.append("zero_engagement_shouting")
+
+        # Signal 6: Neural Authenticity & Astroturf Classifier (mDeBERTa-v3)
+        neural_astroturf_prob = comment.get("neural_astroturf_prob")
+        if neural_astroturf_prob is not None:
+            if neural_astroturf_prob >= 0.70:
+                score += 0.40
+                reasons.append("neural_astroturf_high_confidence")
+            elif neural_astroturf_prob >= 0.45:
+                score += 0.20
+                reasons.append("neural_astroturf_suspicious")
+            elif neural_astroturf_prob < 0.15:
+                score = max(0.0, score - 0.25)
+                reasons.append("neural_organic_verified")
 
         return {
             "bot_probability": min(round(score, 2), 1.0),
@@ -186,6 +220,20 @@ class BotAstroturfDetector:
         for cl in clusters:
             if cl["is_cross_account"] or cl["occurrences"] >= 2:
                 clustered_texts.update(cl.get("samples", []))
+
+        # Batch evaluate comments with Strategic Neural Classifier if available
+        comment_texts = [str(c.get("text") or "").strip() for c in comments]
+        valid_indices = [i for i, t in enumerate(comment_texts) if len(t) >= 15]
+        if valid_indices:
+            try:
+                from identify_what_matters.strategic_classifier import classify_strategic_batch
+                neural_res = classify_strategic_batch([comment_texts[i] for i in valid_indices], batch_size=32)
+                for idx, n_out in zip(valid_indices, neural_res):
+                    if n_out:
+                        comments[idx]["neural_astroturf_prob"] = n_out.get("astroturf_prob", 0.0)
+                        comments[idx]["neural_authenticity"] = n_out.get("authenticity", "organic")
+            except Exception:
+                pass
 
         evaluations = []
         for c in comments:

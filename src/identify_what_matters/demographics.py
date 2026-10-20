@@ -18,15 +18,108 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 import joblib
+import torch
 
 # ---------------------------------------------------------------- LOAD TRAINED CLASSIFIERS ----
 MODELS_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "demographics_models"
+BERT_PARTY_DIR = MODELS_DIR / "bert-party-support-17" if (MODELS_DIR / "bert-party-support-17").exists() else MODELS_DIR / "bert-party-support"
+NEURAL_DEMO_DIR = MODELS_DIR / "neural_contrastive_demographics"
+
 _AGE_MODEL = None
 _GENDER_MODEL = None
 _MENTAL_STATE_MODEL = None
 _IMPATIENCE_MODEL = None
 _IRRATIONALITY_MODEL = None
 _PARTY_MODEL = None
+_BERT_PARTY_TOKENIZER = None
+_BERT_PARTY_MODEL = None
+_NEURAL_DEMO_TOKENIZER = None
+_NEURAL_DEMO_MODEL = None
+_NEURAL_DEMO_CONFIG = None
+
+def _get_neural_demographics_model():
+    """Lazy loader for multi-task contrastive neural demographic model."""
+    global _NEURAL_DEMO_TOKENIZER, _NEURAL_DEMO_MODEL, _NEURAL_DEMO_CONFIG
+    if _NEURAL_DEMO_MODEL is None and NEURAL_DEMO_DIR.exists() and (NEURAL_DEMO_DIR / "demographic_heads.pt").exists():
+        try:
+            from transformers import AutoTokenizer
+            import sys
+            repo_root = str(Path(__file__).resolve().parents[2])
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            from train_contrastive_demographics_vm import MultiTaskContrastiveDemographics, MENTAL_CLASSES, AGE_CLASSES
+
+            _NEURAL_DEMO_TOKENIZER = AutoTokenizer.from_pretrained(NEURAL_DEMO_DIR)
+            model = MultiTaskContrastiveDemographics(
+                str(NEURAL_DEMO_DIR),
+                num_mental=len(MENTAL_CLASSES),
+                num_age=len(AGE_CLASSES)
+            )
+            ckpt = torch.load(NEURAL_DEMO_DIR / "demographic_heads.pt", map_location="cpu")
+            model.mental_head.load_state_dict(ckpt["mental_head"])
+            model.age_head.load_state_dict(ckpt["age_head"])
+            model.eval()
+            _NEURAL_DEMO_MODEL = model
+            _NEURAL_DEMO_CONFIG = ckpt.get("config", {})
+        except Exception:
+            _NEURAL_DEMO_MODEL = None
+    return _NEURAL_DEMO_TOKENIZER, _NEURAL_DEMO_MODEL, _NEURAL_DEMO_CONFIG
+
+def predict_demographics_neural(text: str) -> tuple[tuple[str, float] | None, tuple[str, float] | None]:
+    """Predict mental state and age bracket using fine-tuned contrastive DeBERTa model."""
+    tok, mod, cfg = _get_neural_demographics_model()
+    if tok is None or mod is None or not text.strip():
+        return None, None
+    try:
+        from train_contrastive_demographics_vm import ID2MENTAL, ID2AGE
+        enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            m_logits, a_logits, _, _ = mod(enc["input_ids"], enc["attention_mask"])
+            m_probs = torch.softmax(m_logits, dim=-1)[0]
+            a_probs = torch.softmax(a_logits, dim=-1)[0]
+
+            m_idx = torch.argmax(m_probs).item()
+            a_idx = torch.argmax(a_probs).item()
+
+            mental_res = (ID2MENTAL[m_idx], round(float(m_probs[m_idx].item()), 3))
+            age_res = (ID2AGE[a_idx], round(float(a_probs[a_idx].item()), 3))
+            return mental_res, age_res
+    except Exception:
+        return None, None
+
+def _get_bert_party_model():
+    """Lazy loader for fine-tuned mDeBERTa-v3 neural party support classifier."""
+    global _BERT_PARTY_TOKENIZER, _BERT_PARTY_MODEL
+    if _BERT_PARTY_MODEL is None and BERT_PARTY_DIR.exists():
+        try:
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            _BERT_PARTY_TOKENIZER = AutoTokenizer.from_pretrained(BERT_PARTY_DIR)
+            _BERT_PARTY_MODEL = AutoModelForSequenceClassification.from_pretrained(BERT_PARTY_DIR)
+            _BERT_PARTY_MODEL.eval()
+        except Exception:
+            _BERT_PARTY_MODEL = None
+    return _BERT_PARTY_TOKENIZER, _BERT_PARTY_MODEL
+
+def predict_party_neural(text: str) -> tuple[str, float] | None:
+    """Predict political party leaning using fine-tuned neural transformer."""
+    tok, mod = _get_bert_party_model()
+    if tok is None or mod is None or not text.strip():
+        return None
+    try:
+        if hasattr(mod.config, "id2label") and mod.config.id2label:
+            idx2party = [mod.config.id2label[i] for i in range(len(mod.config.id2label))]
+        else:
+            idx2party = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
+        enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            logits = mod(**enc).logits
+            probs = torch.softmax(logits, dim=-1)[0]
+            idx = torch.argmax(probs).item()
+            label = idx2party[idx] if idx < len(idx2party) else "None"
+            conf = float(probs[idx].item())
+            return label, conf
+    except Exception:
+        return None
 
 def _get_models():
     global _AGE_MODEL, _GENDER_MODEL, _MENTAL_STATE_MODEL, _IMPATIENCE_MODEL, _IRRATIONALITY_MODEL, _PARTY_MODEL
@@ -278,17 +371,16 @@ def infer_age(text: str) -> tuple[str, float, str | None]:
         if age >= 55:
             return "55+", 0.85, "stated-year"
 
-    for cues, bracket, conf in AGE_CUES:
-        if any(c in low for c in cues):
-            return bracket, conf, "bio-cue"
+    words = set(re.findall(r"\b[a-z0-9\+\.\-]+\b", low))
 
-    tokens = set(re.findall(r"\b[a-z]+\b", low))
-    if tokens & GEN_Z_SLANG:
-        return "18-24", 0.50, "youth-slang"
-    if tokens & PROFESSIONAL_SLANG:
-        return "25-34", 0.50, "career-professional"
-    if tokens & MATURE_SLANG:
-        return "35-54", 0.45, "civic-respect"
+    for cues, bracket, conf in AGE_CUES:
+        for c in cues:
+            if " " in c:
+                if c in low:
+                    return bracket, conf, "bio-cue"
+            else:
+                if c in words:
+                    return bracket, conf, "bio-cue"
 
     # ML Classifier fallback
     age_m, _, _, _, _, _ = _get_models()
@@ -357,7 +449,7 @@ def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
     """Infers demographic and behavioral profile for an individual comment."""
     raw_user = comment.get("user") or {}
     username = raw_user.get("username") or comment.get("username") or ""
-    text = comment.get("text", "")
+    text = comment.get("text") or comment.get("body") or ""
 
     if username:
         d = infer_profile(username, bio=text[:200])
@@ -377,13 +469,81 @@ def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
         elif any(w in low for w in MALE_CONVERSATIONAL):
             d.gender, d.gender_confidence, _ = "male", 0.45, "conversational-cue"
 
-    # Age fallback
+    # Infer age from heuristics first
     if d.age_bracket == "unknown":
         a, a_conf, a_ev = infer_age(text)
-        d.age_bracket, d.age_confidence = a, a_conf
+        if a != "unknown":
+            d.age_bracket, d.age_confidence = a, a_conf
+
+    # Get ML models
+    age_m, gen_m, state_m, imp_m, irr_m, party_m = _get_models()
+
+    # Neural multi-task contrastive demographic model with calibrated ensembling
+    neural_mental, neural_age = predict_demographics_neural(text)
+    if neural_mental:
+        # If linear mental state classifier exists, evaluate calibrated ensemble (0.65 Neural + 0.35 Linear)
+        if state_m is not None and hasattr(state_m, "predict_proba"):
+            try:
+                import numpy as np
+                tok, mod, _ = _get_neural_demographics_model()
+                enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                with torch.no_grad():
+                    m_logits, _, _, _ = mod(enc["input_ids"], enc["attention_mask"])
+                    neural_probs = torch.softmax(m_logits, dim=-1)[0].numpy()
+                from train_contrastive_demographics_vm import MENTAL_CLASSES, ID2MENTAL
+                lin_probs = state_m.predict_proba([text])[0]
+                lin_classes = list(state_m.classes_)
+                lin_reordered = np.array([lin_probs[lin_classes.index(c)] if c in lin_classes else 0.0 for c in MENTAL_CLASSES])
+                ens_m = 0.65 * neural_probs + 0.35 * lin_reordered
+                best_idx = int(np.argmax(ens_m))
+                d.mental_state = ID2MENTAL[best_idx]
+                d.mental_state_confidence = round(float(ens_m[best_idx]), 3)
+            except Exception:
+                d.mental_state, d.mental_state_confidence = neural_mental
+        else:
+            d.mental_state, d.mental_state_confidence = neural_mental
+
+    # Age bracket prediction: Combine lifecycle priors + ML classifier + neural representation
+    if d.age_bracket == "unknown":
+        if age_m is not None and hasattr(age_m, "predict_proba"):
+            try:
+                import numpy as np
+                from train_contrastive_demographics_vm import AGE_CLASSES, ID2AGE
+                lin_probs = age_m.predict_proba([text])[0]
+                lin_classes = list(age_m.classes_)
+                lin_reordered = np.array([lin_probs[lin_classes.index(c)] if c in lin_classes else 0.0 for c in AGE_CLASSES])
+
+                # Domain lifecycle prior weights
+                prior = np.zeros(len(AGE_CLASSES))
+                if any(k in low for k in ['retire', 'pension', 'budhape', 'budhapa', '500 years', 'since 200', 'since 19', '30 saal', '35 saal', 'planning commission', 'in my youth', 'elders', 'fixed deposit interest', 'grandchild', 'pota', 'poti']):
+                    prior[AGE_CLASSES.index('55+')] += 0.35
+                if any(k in low for k in ['cbse', 'board exam', 'term 1', 'term 2', '10th', '12th', 'science exam', 'maths exam', 'school', 'mummy', 'homework', 'syllabus', 'exam hai']):
+                    prior[AGE_CLASSES.index('13-17')] += 0.40
+                if any(k in low for k in ['college', 'semester', 'placement', 'fresher', 'campus', 'hostel', 'bro,', 'bro ', 'cutoff', 'agniveer', 'nta', 'neet', 'jee', 'b.tech', 'undergrad']):
+                    prior[AGE_CLASSES.index('18-24')] += 0.25
+                if any(k in low for k in ['school fees', 'daughter', 'son', 'home loan', 'c-section', 'income tax', 'cpi', 'rbi', 'gsdp', 'fiscal deficit', 'cabinet', 'parliament']):
+                    prior[AGE_CLASSES.index('35-54')] += 0.20
+
+                if neural_age:
+                    tok, mod, _ = _get_neural_demographics_model()
+                    enc = tok(text, padding=True, truncation=True, max_length=128, return_tensors="pt")
+                    with torch.no_grad():
+                        _, a_logits, _, _ = mod(enc["input_ids"], enc["attention_mask"])
+                        neural_a_probs = torch.softmax(a_logits, dim=-1)[0].numpy()
+                    ens_a = 0.65 * lin_reordered + 0.25 * neural_a_probs + 0.35 * prior
+                else:
+                    ens_a = lin_reordered + 0.35 * prior
+
+                best_a_idx = int(np.argmax(ens_a))
+                d.age_bracket = ID2AGE[best_a_idx]
+                d.age_confidence = round(float(min(ens_a[best_a_idx], 0.95)), 3)
+            except Exception:
+                if neural_age:
+                    d.age_bracket, d.age_confidence = neural_age
+        elif neural_age:
+            d.age_bracket, d.age_confidence = neural_age
 
     # ML Classifier fallbacks for all behavioral traits
-    age_m, gen_m, state_m, imp_m, irr_m, party_m = _get_models()
     combined_text = f"{username} {text}"
 
     if d.gender == "unknown" and gen_m is not None:
@@ -411,10 +571,14 @@ def infer_commenter_demographics(comment: dict) -> ProfileDemographics:
         if cls:
             d.irrationality, d.irrationality_confidence = cls, conf
 
-    if d.party_support == "None" and party_m is not None:
-        cls, conf = _ml_predict(text, party_m, sorted(party_m.classes_))
-        if cls:
-            d.party_support, d.party_confidence = cls, conf
+    if d.party_support == "None":
+        neural_res = predict_party_neural(text)
+        if neural_res and neural_res[0] != "None":
+            d.party_support, d.party_confidence = neural_res
+        elif party_m is not None:
+            cls, conf = _ml_predict(text, party_m, sorted(party_m.classes_))
+            if cls:
+                d.party_support, d.party_confidence = cls, conf
 
     # Heuristic impatience/irrationality
     if d.impatience == "neutral" and d.mental_state == "Civic Anger & Institutional Skepticism":
@@ -470,6 +634,7 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
     comment_gender_counts = Counter()
     comment_age_counts = Counter()
     comment_loc_counts = Counter()
+    mental_state_counts = Counter()
     impatience_counts = Counter()
     irrationality_counts = Counter()
     party_counts = Counter()
@@ -489,6 +654,7 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         comment_age_counts[demo.age_bracket] += 1
         if demo.location_state:
             comment_loc_counts[demo.location_state] += 1
+        mental_state_counts[demo.mental_state] += 1
         impatience_counts[demo.impatience] += 1
         irrationality_counts[demo.irrationality] += 1
         party_counts[demo.party_support] += 1
@@ -610,7 +776,7 @@ def compute_demographic_breakdowns(topic: dict) -> dict:
         "age_distribution": {k: round(v / total_audience, 2) for k, v in blended_age.items()},
         "top_regions": top_regs,
         "side_breakdowns": formatted_sides,
-        "mental_state_distribution": {},
+        "mental_state_distribution": {k: round(v / total_comments, 2) for k, v in mental_state_counts.items()},
         "impatience_distribution": imp_dist,
         "irrationality_distribution": irr_dist,
         "party_support_distribution": party_dist,

@@ -341,7 +341,7 @@ def report(store: ObservationStore, now: datetime, encoder: Any = None, threshol
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    ingest = commands.add_parser("ingest", help="Add a collection.json from instagrapi_client to the store")
+    ingest = commands.add_parser("ingest", help="Add a collection.json from hiker_client to the store")
     ingest.add_argument("collection", type=Path)
     ingest.add_argument("--db", default="output/observations.sqlite")
     analyse = commands.add_parser("report", help="Emerging terms and topics as of now")

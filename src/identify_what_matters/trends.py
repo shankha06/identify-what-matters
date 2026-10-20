@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import math
 import re
@@ -32,9 +33,16 @@ CATEGORIES = (
     "environment_weather_disaster", "crime_law", "religion_festivals_culture", "food_lifestyle",
     "fashion_beauty", "viral_memes_social", "travel_transport", "international", "other",
 )
+POLITICS_ECONOMY_CATEGORIES = {"politics_governance", "civic_issues", "economy_business", "markets_finance",
+                               "crime_law", "international"}
 SEED_HASHTAGS = ("trendingindia", "viralindia", "indiannews", "indianmemes", "desimemes", "reelsindia",
                  "bollywood", "indiancricket", "mumbai", "delhi", "bengaluru", "hyderabad", "chennai",
                  "kolkata", "trendingreels", "news")
+# Political and economy-focused hashtags for targeted collection
+POLITICS_HASHTAGS = ("indianpolitics", "bjp", "congress", "narendramodi", "rahulgandhi", "amitshah",
+                     "arvindkejriwal", "mamatabanerjee", "loksabha", "vidhansabha", "electionindia",
+                     "indiaeconomy", "rupee", "inflation", "budget2025", "makeinindia", "gst",
+                     "farmersprotest", "indiaopposition", "rahul", "modi", "bjp4india")
 GENERIC_HASHTAGS = {
     "india", "reels", "reel", "viral", "trending", "explore", "explorepage", "fyp", "foryou",
     "foryoupage", "love", "instagood", "photooftheday", "fashion", "beautiful", "happy",
@@ -357,16 +365,29 @@ def select_for_probe(topics: list[dict], reference: datetime, limit: int, per_ca
 
 # ---------------------------------------------------------------- Instagram evidence
 
-def probe(topic: dict, transport, reference: datetime | None = None, max_queries: int = 2, enough_recent: int = 6,
-          comment_posts: int = 3) -> dict:
+async def probe(topic: dict, transport, reference: datetime | None = None, max_queries: int = 2, enough_recent: int = 6,
+                comment_posts: int = 3, comment_pages: int = 2, reply_threads: int = 5, call_timeout: int = 150) -> dict:
     """Search queries in order until enough recent posts; then sample comments on the top recent posts."""
+    import asyncio
+
+    async def _safe(method, *args, **kwargs):
+        try:
+            result = method(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                return await asyncio.wait_for(result, timeout=call_timeout)
+            return result
+        except asyncio.TimeoutError:
+            return None
+        except Exception as error:
+            raise
+
     media, seen, used = [], set(), []
     reference = reference or now()
     for query in topic["instagram_queries"][:3]:
         if len(used) >= max_queries:
             break
         try:
-            results = transport.search(query)
+            results = await _safe(transport.search, query)
         except Exception as error:
             topic.setdefault("instagram_errors", []).append(f"{query}: {type(error).__name__}")
             if "budget" in str(error).lower() or "blocked" in str(error).lower():
@@ -385,7 +406,7 @@ def probe(topic: dict, transport, reference: datetime | None = None, max_queries
     valid_tags = [t for t in topic.get("hashtags", []) if t not in GENERIC_HASHTAGS]
     for tag in valid_tags[:1]:
         try:
-            result = transport.hashtag(tag)
+            result = await _safe(transport.hashtag, tag)
         except Exception as error:
             topic.setdefault("instagram_errors", []).append(f"#{tag}: {type(error).__name__}")
             continue
@@ -395,10 +416,11 @@ def probe(topic: dict, transport, reference: datetime | None = None, max_queries
                 if item["code"] not in seen:
                     seen.add(item["code"])
                     media.append(item)
-    recent = [m for m in media if (hours_since(m["taken_at"], reference) or 1e9) <= 24 * 7]
-    for item in sorted(recent, key=lambda m: m.get("like_count") or 0, reverse=True)[:comment_posts]:
+    recent = [m for m in media if (hours_since(m["taken_at"], reference) or 1e9) <= 24 * 30]
+    commentable = [m for m in recent if (m.get("comment_count") or 0) > 0]
+    for item in sorted(commentable, key=lambda m: m["comment_count"], reverse=True)[:comment_posts]:
         try:
-            sampled = transport.comments(item["id"])
+            sampled = await _safe(transport.comments, item["id"], max_pages=comment_pages, max_reply_threads=reply_threads)
         except Exception as error:
             topic.setdefault("instagram_errors", []).append(f"comments: {type(error).__name__}")
             continue
@@ -410,8 +432,9 @@ def probe(topic: dict, transport, reference: datetime | None = None, max_queries
 
 
 def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, comment_pool_size: int = 120) -> dict:
-    media = sorted(topic.get("instagram", {}).get("media", []),
-                   key=lambda m: hours_since(m["taken_at"], reference) or 1e9)[:18]
+    by_age = sorted(topic.get("instagram", {}).get("media", []),
+                    key=lambda m: hours_since(m["taken_at"], reference) or 1e9)
+    media = list({m["code"]: m for m in by_age[:18] + [m for m in by_age if m.get("comments")][:18]}.values())
     posts = [{"i": i, "age_hours": round(hours_since(m["taken_at"], reference) or -1), "likes": m["like_count"],
               "comments": m["comment_count"], "reel": m["is_reel"],
               "source": (m.get("panel") or {}).get("group") or ("trend search" if m.get("x_terms") else "search/hashtag"),
@@ -455,11 +478,19 @@ def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, co
         "toward the post's subject; read sarcasm as its intended meaning), sarcastic true/false, and side = index of "
         "the debate side it backs (0-based, null if none or no debate). Off-topic or spam comments: tone neutral, "
         "side null, off_topic true.\n"
+        "10. political_framing: classify the POST's OWN CAPTION/NARRATIVE (not the comments) as one of: "
+        "\"pro_incumbent\" (frames BJP/NDA positively — achievement, defence, development), "
+        "\"anti_incumbent\" (frames BJP/NDA critically — failure, corruption, attack), "
+        "\"pro_opposition\" (frames Opposition/INDIA bloc positively), "
+        "\"anti_opposition\" (frames Opposition critically), or \"neutral\" (factual, no partisan lean). "
+        "Give confidence 0-1 and a basis phrase (≤10 words from the caption that signals the frame). "
+        "If there are no posts or the topic is non-political, use neutral with confidence 0.\n"
         'Return {"on_topic": [..], "discussion_level": "...", "summary": "...", "what_people_say": ["..."], '
         '"stance": {"supportive": 0, "critical": 0, "humorous": 0, "neutral": 0}, "why_trending": "...", "caution": null, '
         '"debate": {"is_debate": true, "question": "...", "sides": [{"position": "...", "share": 0.5, "example": "..."}], '
         '"intensity": "medium"}, "comment_labels": [{"c": 0, "tone": "critical", "sarcastic": false, "side": 1, '
-        '"off_topic": false}]}'
+        '"off_topic": false}], '
+        '"political_framing": {"direction": "neutral", "confidence": 0.0, "basis": ""}}'
     )
     result = llm.json(prompt, SYSTEM, validate=_require("summary", "on_topic", "discussion_level"))
     result["on_topic_codes"] = [media[i]["code"] for i in result.get("on_topic", []) if isinstance(i, int) and 0 <= i < len(media)]
@@ -529,7 +560,7 @@ def instagram_metrics(topic: dict, reference: datetime) -> dict:
         "engagement_per_hour": round(engagement, 1),
         "comments_7d": sum(m["comment_count"] or 0 for m in relevant if (hours_since(m["taken_at"], reference) or 1e9) <= 168),
         "plays_7d": sum(m["play_count"] or 0 for m in relevant if (hours_since(m["taken_at"], reference) or 1e9) <= 168),
-        "sampled_comments": sum(len(m.get("comments", [])) for m in relevant),
+        "sampled_comments": sum(len(m.get("comments", [])) for m in media),
         "hashtag_counts": topic.get("instagram", {}).get("hashtag_counts", {}),
         "hashtag_on_topic_share": round(sum(m["code"] in on_topic for m in tag_media) / len(tag_media), 2) if tag_media and topic.get("brief") else None,
         "likes_7d": sum(m["like_count"] or 0 for m in relevant if (hours_since(m["taken_at"], reference) or 1e9) <= 168),
@@ -700,7 +731,7 @@ class History:
         with self.db:
             for account, items in feeds.items():
                 usable = [m for m in items if m.get("taken_at") and not (m.get("pinned") or m.get("paid") or m.get("counts_hidden"))
-                          and m.get("like_count") is not None]
+                          and m.get("like_count") is not None and m.get("comment_verified")]
                 settled = [m for m in usable if (hours_since(m["taken_at"], reference) or 0) >= 6] or usable
                 if len(settled) < 3:
                     continue
@@ -819,7 +850,8 @@ def render(report: dict) -> str:
              f"Instagram panel: {report.get('panel_accounts_read', 0)} accounts read; trending terms searched: "
              f"{report.get('trend_terms_searched', 0)}; Instagram-first discussions found: {report['native_topics']}. "
              f"Prior runs in history: {report['history_runs'] - 1}. "
-             f"LLM: {report['llm']['calls']} calls, {report['llm']['output_tokens']:,} output tokens.", ""]
+             f"LLM: {report['llm']['calls']} calls, {report['llm']['output_tokens']:,} output tokens. "
+             "Reddit discussion is shown as a separate proxy and is not Instagram measurement.", ""]
     if report["history_runs"] <= 1:
         lines += ["> First run: 'emerging' uses within-run evidence only (5+ on-topic Instagram posts in 24 h making up "
                   "60%+ of the past week's posts, and news no older than 36 h). Run every 3-6 h to get rising/fading.", ""]
@@ -829,7 +861,8 @@ def render(report: dict) -> str:
               "Stage (from the topic's own posts): **pre breakout** = posts under 12 h over-performing their accounts, "
               "1-2 accounts, no press; **breaking out** = 3+ accounts posted in the last 6 h; **peak** = 8+ accounts or "
               "3+ news publishers; **saturated** = 5+ publishers; **settled** = no new post in 24 h; **simmering** = "
-              "active without early-acceleration evidence.", ""]
+              "active without early-acceleration evidence; **unobserved** = insufficient Instagram evidence. "
+              "Reddit proxy activity does not change these stages.", ""]
 
     def block(topic):
         ig, brief_ = topic["instagram_metrics"], topic.get("brief") or {}
@@ -843,6 +876,14 @@ def render(report: dict) -> str:
             out.append(f"\n{brief_['summary']}")
         if brief_.get("why_trending"):
             out.append(f"\n*Why now:* {brief_['why_trending']}")
+        reddit_proxy = topic.get("reddit_proxy") or {}
+        if reddit_proxy.get("thread_count"):
+            out.append("\n*Reddit proxy (observed Reddit data; not Instagram):* "
+                       f"{reddit_proxy['thread_count']} threads across {reddit_proxy['subreddit_count']} subreddits, "
+                       f"{reddit_proxy['upvotes']:,} post upvotes, {reddit_proxy['post_comments']:,} post comments, "
+                       f"and {reddit_proxy['sampled_comments']} sampled comments.")
+            for excerpt in reddit_proxy.get("comment_excerpts", [])[:3]:
+                out.append(f"> {excerpt['text']} ({excerpt['subreddit']}, score {excerpt['score']})")
         if brief_.get("what_people_say"):
             out.append("\n*What people are saying:*")
             out += [f"- {point}" for point in brief_["what_people_say"]]
@@ -1003,6 +1044,82 @@ def render(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def reddit_proxy_for_topic(topic: dict, posts: list[dict]) -> dict:
+    """Summarize directly matched Reddit evidence without imputing Instagram metrics."""
+    stopwords = {
+        "about", "after", "again", "also", "among", "been", "before", "being", "between", "could",
+        "from", "have", "into", "just", "more", "most", "other", "over", "said", "says", "such",
+        "than", "that", "their", "there", "these", "they", "this", "those", "through", "under",
+        "were", "what", "when", "where", "which", "while", "with", "would", "your", "india", "news",
+        "today", "delhi", "police", "people", "case", "years", "first", "time",
+    }
+
+    def normalized(value: str) -> str:
+        return " ".join(re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE))
+
+    def tokens(value: str) -> set[str]:
+        return {word for word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
+                if len(word) >= 4 and word not in stopwords and not word.isdigit()}
+
+    reference_texts = list(dict.fromkeys(
+        value.strip() for value in [topic.get("title", ""), *(topic.get("headlines") or []),
+                                    *(topic.get("entities") or [])]
+        if isinstance(value, str) and value.strip()
+    ))
+    reference_normalized = {normalized(value) for value in reference_texts}
+    reference_tokens = [tokens(value) for value in reference_texts]
+    matched = []
+    for post in posts:
+        title = str(post.get("title") or "")
+        post_normalized = normalized(title)
+        post_tokens = tokens(title)
+        exact = bool(post_normalized and post_normalized in reference_normalized)
+        best_overlap = 0
+        best_ratio = 0.0
+        if not exact and post_tokens:
+            for words in reference_tokens:
+                overlap = len(words & post_tokens)
+                ratio = overlap / min(len(words), len(post_tokens)) if words else 0.0
+                if overlap > best_overlap or (overlap == best_overlap and ratio > best_ratio):
+                    best_overlap, best_ratio = overlap, ratio
+        if not exact and (best_overlap < 3 or best_ratio < 0.5):
+            continue
+        engagement = post.get("engagement") or {}
+        feed = str(post.get("feed") or "unknown")
+        subreddit = feed.rsplit("/", 1)[0] if "/" in feed else feed
+        comments = [comment for comment in post.get("comments", [])
+                    if isinstance(comment, dict) and str(comment.get("body") or "").strip()]
+        matched.append({
+            "title": title,
+            "feed": feed,
+            "subreddit": subreddit,
+            "score": int(engagement.get("score") or 0),
+            "comments": int(engagement.get("comments") or 0),
+            "sampled_comments": len(comments),
+            "published_at": post.get("published_at"),
+            "url": post.get("url"),
+            "match": "exact_headline" if exact else "strong_title_overlap",
+            "comment_excerpts": [
+                {"text": re.sub(r"\s+", " ", str(comment.get("body")))[:280],
+                 "score": int(comment.get("score") or 0), "subreddit": subreddit}
+                for comment in sorted(comments, key=lambda item: int(item.get("score") or 0), reverse=True)[:2]
+            ],
+        })
+    matched.sort(key=lambda item: (item["score"] + 2 * item["comments"], item["published_at"] or ""), reverse=True)
+    excerpts = [excerpt for post in matched for excerpt in post["comment_excerpts"]][:5]
+    return {
+        "source": "saved_reddit_signals",
+        "label": "Reddit proxy; not Instagram measurement",
+        "thread_count": len(matched),
+        "subreddit_count": len({item["subreddit"] for item in matched}),
+        "upvotes": sum(item["score"] for item in matched),
+        "post_comments": sum(item["comments"] for item in matched),
+        "sampled_comments": sum(item["sampled_comments"] for item in matched),
+        "threads": matched[:8],
+        "comment_excerpts": excerpts,
+    }
+
+
 # ---------------------------------------------------------------- orchestration
 
 JUDGE_SYSTEM = ("You are a strict auditor of automated trend reports. You did not write the report. Judge only from the "
@@ -1046,27 +1163,11 @@ def judge(topics: list[dict], llm, batch_size: int = 10) -> dict | None:
     return {"audited": len(rows), "coherent_rate": rate("coherent"), "india_relevant_rate": rate("india_relevant"),
             "faithful_rate": rate("faithful"), "pass_rate": rate("verdict", "pass")}
 
-def make_transport(kind: str, budget: int, settings_file: str | None, port: int = 8765):
-    if kind == "mock":
-        from identify_what_matters.instagram_access import MockTransport
-        return MockTransport(request_budget=budget)
-    if kind == "instagrapi":
-        from identify_what_matters.instagram_access import InstagrapiTransport
-        try:
-            return InstagrapiTransport(request_budget=budget, settings_file=settings_file)
-        except Exception as e:
-            print(f"[warning] Instagrapi transport failed ({e}); falling back to mock transport", flush=True)
-            from identify_what_matters.instagram_access import MockTransport
-            return MockTransport(request_budget=budget)
-    if kind == "browser":
-        from identify_what_matters.instagram_access import BrowserTransport
-        try:
-            return BrowserTransport(port=port, request_budget=budget)
-        except Exception as e:
-            print(f"[warning] Browser transport failed ({e}); falling back to mock transport", flush=True)
-            from identify_what_matters.instagram_access import MockTransport
-            return MockTransport(request_budget=budget)
-    return None
+def make_transport(kind: str, budget: int):
+    if kind != "hiker":
+        raise ValueError(f"Unsupported Instagram transport: {kind}")
+    from identify_what_matters.instagram_access import HikerTransport
+    return HikerTransport(request_budget=budget)
 
 
 def plan_from_signals(signals: list[dict], availability: dict, run_dir: Path, llm, reference: datetime,
@@ -1097,9 +1198,102 @@ def plan_from_signals(signals: list[dict], availability: dict, run_dir: Path, ll
     return plan
 
 
+def plan_from_discovery_shortlist(discovery: dict, run_dir: Path, reference: datetime, max_topics: int) -> dict:
+    """Build Instagram probes from ranked discovery candidates without LLM topic synthesis."""
+    signals = discovery.get("signals", [])
+    candidates = discovery.get("candidates", [])
+    candidate_by_id = {str(item.get("story_id")): item for item in candidates if item.get("story_id")}
+    shortlist = discovery.get("probe_candidate_ids", [])
+    if not shortlist:
+        shortlist = [item.get("story_id") for item in candidates
+                     if item.get("prefilter", {}).get("recommended_for_instagram_probe")]
+    signal_by_id = {str(item.get("id")): item for item in signals if item.get("id")}
+    stopwords = {"about", "after", "against", "also", "and", "are", "been", "before", "between", "from",
+                 "have", "into", "just", "more", "most", "news", "over", "said", "says", "that", "their",
+                 "there", "these", "they", "this", "those", "through", "under", "were", "what", "when",
+                 "where", "which", "while", "with", "would", "your"}
+
+    def concise_query(value: str) -> str:
+        words = re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+        salient = [word for word in words if len(word) >= 3 and not word.isdigit() and word.casefold() not in stopwords]
+        return " ".join(salient[:5])
+
+    topics = []
+    for story_id in shortlist:
+        candidate = candidate_by_id.get(str(story_id))
+        if not candidate:
+            continue
+        titles = [title.strip() for title in candidate.get("titles", []) if isinstance(title, str) and title.strip()]
+        evidence = [signal_by_id.get(str(signal_id), {}) for signal_id in candidate.get("signals", [])]
+        reddit_titles = [item.get("title", "") for item in evidence if item.get("source") == "reddit"]
+        queries = [query.strip().lstrip("#") for query in candidate.get("trend_queries", [])
+                   if isinstance(query, str) and query.strip()]
+        queries.extend(concise_query(title) for title in reddit_titles + titles)
+        queries = list(dict.fromkeys(query for query in queries if len(query) >= 3))[:3]
+        if not titles or not queries:
+            continue
+        topic_key = f"discovery_{candidate['story_id']}"
+        tags = list(dict.fromkeys(re.findall(r"#([\w]{3,30})", " ".join(titles))))[:2]
+        entities = list(dict.fromkeys(
+            match.strip() for title in titles[:2]
+            for match in re.findall(r"\b[A-Z][A-Za-z0-9'-]*(?:\s+[A-Z][A-Za-z0-9'-]*){1,2}", title)
+        ))[:6]
+        topics.append({
+            "topic_key": topic_key,
+            "origin": "discovery_shortlist_local_queries",
+            "title": titles[0][:160],
+            "category": "other",
+            "entities": entities,
+            "hashtags": tags,
+            "instagram_queries": queries,
+            "headlines": titles[:6],
+            "publishers": candidate.get("publishers", 0),
+            "languages": candidate.get("languages", []),
+            "trends_traffic": candidate.get("trends_traffic", 0),
+            "trend_queries": candidate.get("trend_queries", []),
+            "social_feed_hits": candidate.get("social_feed_hits", 0),
+            "reddit_engagement": candidate.get("reddit_engagement", 0),
+            "earliest": candidate.get("earliest"),
+            "latest": candidate.get("latest"),
+            "discovery_prefilter": candidate.get("prefilter", {}),
+        })
+        if len(topics) >= max_topics:
+            break
+
+    probe_keys = [topic["topic_key"] for topic in topics]
+    plan = {
+        "run_id": run_dir.name,
+        "planned_at": reference.isoformat(),
+        "availability": discovery.get("availability", {}),
+        "signals": len(signals),
+        "stories": len(candidates),
+        "topics": topics,
+        "probe_keys": probe_keys,
+        "probe_queries": [{"key": topic["topic_key"], "queries": topic["instagram_queries"],
+                           "hashtags": topic["hashtags"][:1]} for topic in topics],
+        "planning_mode": "ranked_discovery_shortlist_local_queries",
+    }
+    write(run_dir / "signals.json", signals)
+    write(run_dir / "stories.json", candidates)
+    write(run_dir / "plan.json", plan)
+    return plan
+
+
 def run_plan(args, run_dir: Path, llm) -> dict:
-    from identify_what_matters.sources import collect_signals
-    signals, availability = collect_signals(include_reddit=not args.no_reddit)
+    if args.discovery_file:
+        discovery_path = Path(args.discovery_file)
+        discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
+        signals = discovery.get("signals")
+        availability = discovery.get("availability", {})
+        if not isinstance(signals, list) or not isinstance(availability, dict):
+            raise ValueError(f"Invalid discovery artifact: expected signals list and availability object in {discovery_path}")
+        if args.use_discovery_shortlist:
+            return plan_from_discovery_shortlist(discovery, run_dir, now(), args.max_topics)
+    else:
+        if args.use_discovery_shortlist:
+            raise ValueError("--use-discovery-shortlist requires --discovery-file")
+        from identify_what_matters.sources import collect_signals
+        signals, availability = collect_signals(include_reddit=not args.no_reddit)
     output_root = Path(args.output_root) if hasattr(args, "output_root") else run_dir.parent
     return plan_from_signals(signals, availability, run_dir, llm, now(), args.max_topics, output_root=output_root)
 
@@ -1108,20 +1302,32 @@ def run_collect(args, run_dir: Path) -> dict:
     """All network collection that needs no LLM: public signals (X trends, Reddit) and every Instagram request."""
     from identify_what_matters.discussions import collect_instagram, load_panel, select_trend_terms
     from identify_what_matters.sources import collect_signals
+    run_dir.mkdir(parents=True, exist_ok=True)
     plan_path = run_dir / "plan.json"
     plan = json.loads(plan_path.read_text()) if plan_path.exists() else {"topics": [], "probe_keys": [], "probe_queries": []}
-    signals, availability = collect_signals(include_reddit=not args.no_reddit, include_google=not plan_path.exists())
+    if plan_path.exists():
+        plan["probe_keys"] = [t["topic_key"] for t in plan["topics"]
+                              if t.get("category") in POLITICS_ECONOMY_CATEGORIES][:args.max_topics]
+        write(plan_path, plan)
+    if getattr(args, "skip_public_sources", False):
+        signals, availability = [], {}
+    else:
+        signals, availability = collect_signals(include_reddit=not args.no_reddit, include_google=not plan_path.exists())
     planned = json.loads((run_dir / "signals.json").read_text()) if (run_dir / "signals.json").exists() else []
     exclude = {q for p in plan.get("probe_queries", []) for q in p["queries"]}
     terms = select_trend_terms(planned + signals, exclude, args.trend_terms)
     print(f"[collect] {len(signals)} signals ({sum(not isinstance(v, int) for v in availability.values())} sources unavailable); "
           f"{len(terms)} trending terms; {len(plan.get('probe_keys', []))} planned topics to probe", flush=True)
-    transport = None if args.no_instagram else make_transport(
-        args.instagram, args.request_budget, args.settings_file, port=args.bridge_port)
+    transport = None if args.no_instagram else make_transport(args.instagram, args.request_budget)
     if transport:
-        bundle = collect_instagram(plan, transport, parse_time(transport.captured_at), load_panel(args.panel), terms,
-                                   comment_posts=getattr(args, "comment_posts", 3))
+        panel = load_panel(args.panel)
+        bundle = asyncio.run(collect_instagram(plan, transport, parse_time(transport.captured_at), panel, terms,
+                                              comment_posts=getattr(args, "comment_posts", 3),
+                                              panel_total_budget=getattr(args, "panel_total_budget", 800)))
         transport.close(run_dir / "instagram_capture.json")
+        from identify_what_matters.account_discovery import record_run_observations, write_proposals as write_account_proposals
+        record_run_observations(bundle, panel, run_dir.name)
+        write_account_proposals()
     else:
         bundle = {"feeds": {}, "terms": {}, "probes": {}, "comments": {}, "stopped": False, "missing_accounts": []}
     collected = {"captured_at": (transport.captured_at if transport else now().isoformat()),
@@ -1141,6 +1347,13 @@ def run_measure(args, run_dir: Path, llm) -> dict:
     """Analysis on a collected run (replayed from its capture, no Instagram requests): discussions, briefs, report."""
     from identify_what_matters.discussions import collect_instagram, discover_discussions, load_panel
     from identify_what_matters.instagram_access import ReplayTransport
+    import time
+    started = time.monotonic()
+
+    def step(message: str) -> None:
+        print(f"[measure] {message} (+{time.monotonic() - started:.0f}s)", flush=True)
+
+    step(f"start: {run_dir.name}")
     collect_path = run_dir / "collect.json"
     collected = json.loads(collect_path.read_text()) if collect_path.exists() else {"availability": {}, "signals": [], "trend_terms": []}
     if collected.get("transport") == "none":
@@ -1157,16 +1370,20 @@ def run_measure(args, run_dir: Path, llm) -> dict:
     reference = parse_time(getattr(transport, "captured_at", None)) or now()
     topics = plan["topics"]
     probed = [t for t in topics if t["topic_key"] in set(plan["probe_keys"])]
+    metrics_only = getattr(args, "metrics_only", False)
     native, bundle = [], {"feeds": {}, "terms": {}, "comments": {}}
     history = History(Path(args.output_root) / "trends.sqlite")
-    if (run_dir / "instagram.json").exists():
+    if not transport and (run_dir / "instagram.json").exists():
         stored_instagram = json.loads((run_dir / "instagram.json").read_text())
         for topic in probed:
             topic["instagram"] = stored_instagram.get(topic["topic_key"]) or {"media": [], "queries_used": [], "hashtag_counts": {}}
     if transport:
+        step(f"replaying saved capture: {len(transport.feeds)} feeds, {len(transport.comment_map)} comment threads")
         baselines = history.load_baselines()
-        bundle = collect_instagram(plan, transport, reference, load_panel(args.panel), collected["trend_terms"],
-                                   baselines=baselines)
+        bundle = asyncio.run(collect_instagram(plan, transport, reference, load_panel(args.panel), collected["trend_terms"],
+                                              baselines=baselines, comment_posts=getattr(args, "comment_posts", 4)))
+        step(f"replay done: {len(bundle['feeds'])} feeds, {len(bundle['comments'])} comment threads, "
+             f"{len(bundle['probes'])} probes, {len(bundle['terms'])} terms, {len(bundle.get('commenter_overlap', {}))} overlapping commenters")
         if bundle.get("feeds"):
             history.update_baselines(bundle["feeds"], reference)
         for topic in probed:
@@ -1177,7 +1394,10 @@ def run_measure(args, run_dir: Path, llm) -> dict:
             for item in topic["instagram"]["media"]:
                 if item["code"] in panel_by_code and not item.get("panel"):
                     item["panel"] = panel_by_code[item["code"]]
-        native = dedupe_native(discover_discussions(bundle, collected["trend_terms"], llm, reference), probed, llm)
+        if not metrics_only:
+            step("discovering native discussions from panel, trend and seed posts")
+            native = dedupe_native(discover_discussions(bundle, collected["trend_terms"], llm, reference), probed, llm)
+            step(f"native discussions: {len(native)}; LLM {llm.usage()}")
     measured = probed + native
     # Ensure all media across probed and native discussions have their captured comments attached
     comment_lookup = {}
@@ -1201,10 +1421,14 @@ def run_measure(args, run_dir: Path, llm) -> dict:
                             item["comment_count"] = len(c_list)
     comments_per_post = getattr(args, "comments_per_post", 25)
     comment_pool_size = getattr(args, "comment_pool_size", 120)
-    briefs = llm.map(lambda t: brief(t, llm, reference, comments_per_post=comments_per_post, comment_pool_size=comment_pool_size),
-                     [t for t in measured if t.get("instagram", {}).get("media")])
-    for topic, result in zip([t for t in measured if t.get("instagram", {}).get("media")], briefs):
+    brief_topics = [t for t in measured if t.get("instagram", {}).get("media")]
+    step(f"briefing {len(brief_topics)} topics with posts and comments")
+    briefs = [] if metrics_only else llm.map(
+        lambda t: brief(t, llm, reference, comments_per_post=comments_per_post, comment_pool_size=comment_pool_size),
+        brief_topics)
+    for topic, result in zip(brief_topics, briefs):
         topic["brief"] = result
+    step(f"briefs done; LLM {llm.usage()}")
     from identify_what_matters import stance
     if stance.available():
         for topic in [t for t in measured if t.get("brief")]:
@@ -1213,47 +1437,167 @@ def run_measure(args, run_dir: Path, llm) -> dict:
                 topic["brief"]["measured_opinion"] = opinion
 
     all_topics = topics + native
+    step(f"computing metrics for {len(all_topics)} topics")
     for topic in all_topics:
+        if metrics_only:
+            topic.setdefault("first_seen", topic.get("earliest") or reference.isoformat())
         topic["instagram_metrics"] = instagram_metrics(topic, reference)
         topic["scores"] = scores(topic)
-    history.forget(run_dir.name)
-    history.match(all_topics, reference, llm)
-    history_runs = history.runs() + 1
+    if metrics_only:
+        history_runs = history.runs()
+    else:
+        history.forget(run_dir.name)
+        step("matching topics against history")
+        history.match(all_topics, reference, llm)
+        history_runs = history.runs() + 1
+        step(f"history matched; LLM {llm.usage()}")
     from identify_what_matters.proactive_radar import breakout_assessment
     for topic in all_topics:
         topic["status"] = status(topic, reference)
         topic["breakout"] = breakout_assessment(topic, reference)
+        if metrics_only and not topic.get("instagram", {}).get("media"):
+            topic["breakout"] = {
+                "stage": "unobserved",
+                "score": 0.0,
+                "reasons": ["No topic-level Instagram posts were captured before collection stopped."],
+                "signals": {},
+            }
         topic["trajectory"] = topic["breakout"]["stage"]
+    reddit_path = Path(args.output_root) / "reddit_signals.json"
+    reddit_posts = json.loads(reddit_path.read_text(encoding="utf-8")) if reddit_path.exists() else []
+    for topic in all_topics:
+        topic["reddit_proxy"] = reddit_proxy_for_topic(topic, reddit_posts)
     all_topics.sort(key=lambda t: (t.get("brief") is None, -t["scores"]["trend_score"]))
-    quality = judge(all_topics, llm) if not args.no_judge else None
+    step("quality judge" if not args.no_judge and not metrics_only else "quality judge skipped")
+    quality = judge(all_topics, llm) if not args.no_judge and not metrics_only else None
     availability = {**plan["availability"], **collected["availability"]}
     report = {
         "run_id": run_dir.name, "generated_at": reference.isoformat(), "signals": plan["signals"] + len(collected["signals"]),
         "sources_ok": sum(isinstance(v, int) for v in availability.values()),
         "sources_failed": sum(not isinstance(v, int) for v in availability.values()),
-        "availability": availability, "topics_planned": len(topics), "topics_probed": len(probed),
+        "availability": availability, "topics_planned": len(topics), "topics_requested": len(probed),
+        "topics_probed": sum(bool((t.get("instagram") or {}).get("queries_used")) for t in probed),
+        "topics_with_instagram_evidence": sum(bool(t.get("instagram", {}).get("media")) for t in probed),
         "native_topics": len(native), "instagram_transport": collected.get("transport", "replay") if transport else "none",
+        "reddit_proxy_topics": sum(bool(t["reddit_proxy"]["thread_count"]) for t in all_topics),
+        "reddit_proxy_threads": sum(t["reddit_proxy"]["thread_count"] for t in all_topics),
         "instagram_requests": collected.get("instagram_requests"), "panel_accounts_read": len(bundle["feeds"]),
         "missing_accounts": collected.get("missing_accounts", []), "trend_terms_searched": len(bundle["terms"]),
-        "comment_threads": len(bundle["comments"]), "history_runs": history_runs, "llm": llm.usage(), "quality": quality,
+        "comment_threads": len(bundle["comments"]), "commenter_overlap": bundle.get("commenter_overlap", {}),
+        "commenter_personas": commenter_personas(bundle, measured),
+        "history_runs": history_runs, "llm": llm.usage(), "quality": quality,
+        "analysis_mode": "instagram_metrics_only" if metrics_only else "full_llm_analysis",
         "panel_pulse": panel_pulse(bundle, reference, baselines=history.load_baselines()),
         "topics": [{k: v for k, v in t.items() if not k.startswith("_") and k != "instagram"} for t in all_topics],
     }
-    history.save(run_dir.name, reference, all_topics, {k: v for k, v in report.items() if k != "topics"})
+    if not metrics_only:
+        history.save(run_dir.name, reference, all_topics, {k: v for k, v in report.items() if k != "topics"})
     write(run_dir / "instagram.json", {t["topic_key"]: t.get("instagram") for t in measured})
     write(run_dir / "report.json", report)
     (run_dir / "report.md").write_text(render(report))
+    step(f"report written: {run_dir / 'report.md'}")
+    try:
+        from identify_what_matters.emergent_narrative_discovery import write_proposals as write_cluster_proposals
+        write_cluster_proposals(all_topics)
+    except Exception as error:
+        print(f"[measure] emergent issue-cluster discovery skipped: {type(error).__name__}: {str(error)[:120]}", flush=True)
     return report
 
 
-def panel_pulse(bundle: dict, reference: datetime, limit: int = 12,
+def pulse_labels(caption: str, comment_texts: list[str]) -> dict:
+    from collections import Counter
+    from identify_what_matters import political_classifier, stance
+    from identify_what_matters.demographics import _get_models, _ml_predict
+    from identify_what_matters.political_pulse import political_pulse_engine
+    caption = caption or ""
+    texts = [t for t in comment_texts if t][:10] or [caption]
+    labels = political_classifier.classify(caption)
+    tones = stance.label_comments(caption, [], texts) if stance.available() else []
+    tone_counts = Counter(t["tone"] for t in tones)
+    state_model = _get_models()[2]
+    archetypes = Counter()
+    for text in texts:
+        archetype, _ = _ml_predict(text, state_model, sorted(state_model.classes_))
+        if archetype:
+            archetypes[archetype] += 1
+    archetype = archetypes.most_common(1)[0][0] if archetypes else None
+    return {
+        "lean": political_pulse_engine.classify_text_favorability(caption)["leaning"],
+        "direction": labels["direction"]["value"], "target": labels["target"]["value"],
+        "narrative": labels["narrative_type"]["value"], "issue": labels["issue_cluster"]["value"],
+        "tone": tone_counts.most_common(1)[0][0] if tone_counts else None,
+        "sarcasm_share": round(sum(t["sarcastic"] for t in tones) / len(tones), 2) if tones else None,
+        "archetype": archetype,
+        "archetype_share": round(archetypes[archetype] / sum(archetypes.values()), 2) if archetype else None,
+    }
+
+
+def commenter_personas(bundle: dict, measured: list[dict], limit: int = 50) -> list[dict]:
+    from collections import Counter, defaultdict
+    from identify_what_matters import stance
+    from identify_what_matters.discussions import _all_media
+    from identify_what_matters.political_pulse import political_pulse_engine
+    from identify_what_matters.demographics import _get_models, _ml_predict, infer_profile
+    overlap = bundle.get("commenter_overlap") or {}
+    if not overlap:
+        return []
+    code_topic = {}
+    for topic in measured:
+        for m in topic.get("instagram", {}).get("media", []):
+            code_topic.setdefault(m["code"], topic["title"])
+    per_user = defaultdict(list)
+    for media in _all_media(bundle):
+        for c in media.get("comments") or []:
+            uid = c.get("author") or c.get("author_id") or ""
+            if uid in overlap and c.get("text"):
+                per_user[uid].append({"code": media["code"], "text": c["text"], "reply": bool(c.get("parent_id")),
+                                      "likes": c.get("like_count") or 0})
+    state_model = _get_models()[2]
+    classes = sorted(state_model.classes_)
+    personas = []
+    for uid, items in sorted(per_user.items(), key=lambda kv: -len({i["code"] for i in kv[1]}))[:limit]:
+        posts = {i["code"] for i in items}
+        texts = [i["text"] for i in items][:30]
+        leans = Counter(political_pulse_engine.classify_text_favorability(t)["leaning"] for t in texts)
+        tones = Counter(x["tone"] for x in stance.label_comments("", [], texts)) if stance.available() else Counter()
+        archetypes = Counter()
+        for t in texts:
+            archetype, _ = _ml_predict(t, state_model, classes)
+            if archetype:
+                archetypes[archetype] += 1
+        topics = Counter(code_topic[c] for c in posts if c in code_topic)
+        profile = bundle.get("profiles", {}).get(uid) or {}
+        inferred = {}
+        if profile:
+            demo = infer_profile(uid, profile.get("biography") or "", profile.get("city_name") or "")
+            inferred = {"gender": demo.gender, "age_bracket": demo.age_bracket,
+                        "location": demo.location_city or demo.location_state, "party_support": demo.party_support}
+        personas.append({
+            "username": uid, "posts": len(posts), "activity": len(items),
+            "profile": {"followers": profile.get("follower_count"), "following": profile.get("following_count"),
+                        "total_posts": profile.get("media_count"), "verified": profile.get("is_verified"),
+                        "private": profile.get("is_private"), "business": profile.get("is_business"),
+                        "category": profile.get("category"), "bio": (profile.get("biography") or "")[:160]} if profile else None,
+            "inferred": inferred or None,
+            "comments": sum(not i["reply"] for i in items), "replies": sum(i["reply"] for i in items),
+            "likes_received": sum(i["likes"] for i in items),
+            "topics": [t for t, _ in topics.most_common(3)],
+            "lean": leans.most_common(1)[0][0] if leans else None,
+            "tone": tones.most_common(1)[0][0] if tones else None,
+            "archetype": archetypes.most_common(1)[0][0] if archetypes else None,
+        })
+    return personas
+
+
+def panel_pulse(bundle: dict, reference: datetime, limit: int = 200,
                 baselines: dict[str, dict] | None = None) -> list[dict]:
     """Panel posts drawing the most unusual attention for their own account, shown unclustered in the report."""
     from identify_what_matters.discussions import panel_scores
     rows = []
     for item in [m for m in panel_scores(bundle.get("feeds", {}), reference, baselines=baselines) if not m["panel"]["ritual"]][:limit]:
         top = max((c for c in item.get("comments", []) if c.get("text")), key=lambda c: c.get("like_count") or 0, default=None)
-        rows.append({"group": item["panel"]["group"], "age_hours": round(hours_since(item["taken_at"], reference) or 0),
+        labels = pulse_labels(item["caption"], [c.get("text", "") for c in item.get("comments", [])])
+        rows.append({**labels, "group": item["panel"]["group"], "age_hours": round(hours_since(item["taken_at"], reference) or 0),
                      "comments": item["comment_count"], "likes": item["like_count"], **item["panel"],
                      "caption": scrub(item["caption"])[:140].replace("\n", " "), "url": item["url"],
                      "top_comment": scrub(top["text"])[:120].replace("\n", " ") if top else None,
@@ -1276,23 +1620,30 @@ def main() -> None:
                              "run: all three in a single execution; watch: run every --every-hours")
     parser.add_argument("--every-hours", type=float, default=4.0)
     parser.add_argument("--no-judge", action="store_true")
+    parser.add_argument("--metrics-only", action="store_true",
+                        help="skip LLM summaries, discussion synthesis, history matching, and audit during measurement")
     parser.add_argument("--run-id", help="Run to collect/measure; 'latest' = newest planned run not yet collected")
-    parser.add_argument("--instagram", choices=("instagrapi", "browser", "mock"), default="mock",
-                        help="instagrapi: private API; browser: localhost bridge; mock: simulated playback using historical fixtures")
+    parser.add_argument("--discovery-file", help="plan from a saved discovery JSON instead of fetching public sources")
+    parser.add_argument("--use-discovery-shortlist", action="store_true",
+                        help="use saved ranked candidates directly when OpenRouter topic synthesis is unavailable")
+    parser.add_argument("--instagram", choices=("hiker",), default="hiker",
+                        help="collect Instagram data via the hosted Hiker API (HIKERAPI_TOKEN)")
     parser.add_argument("--no-instagram", action="store_true",
                         help="Collect public trend sources only; do not access Instagram or create an Instagram measurement report")
-    parser.add_argument("--bridge-port", type=int, default=8765)
     parser.add_argument("--capture", help="Instagram capture to analyse (default: the run's instagram_capture.json)")
-    parser.add_argument("--settings-file")
     parser.add_argument("--panel", help="Account panel JSON (default config/panel.json)")
     parser.add_argument("--trend-terms", type=int, default=20, help="X/Google trending terms searched on Instagram")
-    parser.add_argument("--max-topics", type=int, default=30, help="News/search topics measured on Instagram per run")
-    parser.add_argument("--request-budget", type=int, default=260, help="Instagram requests per run")
-    parser.add_argument("--comment-posts", type=int, default=3, help="Top recent posts per probed topic to sample comments from")
+    parser.add_argument("--max-topics", type=int, default=150, help="News/search topics measured on Instagram per run")
+    parser.add_argument("--request-budget", type=int, default=1500, help="Instagram requests per run")
+    parser.add_argument("--panel-total-budget", type=int, default=800,
+                        help="Requests per run spent on verified comment totals for panel posts (cached across runs)")
+    parser.add_argument("--comment-posts", type=int, default=4, help="Top posts per probed topic to sample deep comments from")
     parser.add_argument("--comments-per-post", type=int, default=25, help="Max ranked comments per post to include in pool")
     parser.add_argument("--comment-pool-size", type=int, default=120, help="Max total comments per topic brief pool")
-    parser.add_argument("--llm-max-calls", type=int, default=150)
+    parser.add_argument("--llm-max-calls", type=int, default=400)
     parser.add_argument("--no-reddit", action="store_true")
+    parser.add_argument("--skip-public-sources", action="store_true",
+                        help="during collect, skip Reddit, X, Google Trends, and News; use planned signals for Instagram search terms")
     parser.add_argument("--output-root", default="output")
     args = parser.parse_args()
     if args.command == "watch":

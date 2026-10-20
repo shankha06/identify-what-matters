@@ -9,8 +9,8 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=50.0.2",
+    "hikerapi>=1.8.2",
     "httpx>=0.28.1",
-    "instagrapi>=3.0.18",
     "praw>=8.0.3",
     "python-dotenv>=1.2.4",
     "requests>=2.31.0",

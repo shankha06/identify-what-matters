@@ -202,7 +202,7 @@ def model_opinion(topic: dict) -> dict | None:
     debate = brief.get("debate") or {}
     positions = [s["position"] for s in debate.get("sides", []) if isinstance(s, dict) and s.get("position")] \
         if debate.get("is_debate") else []
-    context = f"{topic['title']}. {brief.get('summary', '')}"[:240] + f" || Q: {debate.get('question', '')[:160]}"
+    context = f"{topic['title']}. {brief.get('summary', '')}"[:240] + f" || Q: {(debate.get('question') or '')[:160]}"
 
     # Noise filter comments before labeling
     noise_evals = filter_noise(context, [c["text"] for c in pool], min_similarity=0.45)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -31,6 +32,7 @@ BROWSER_HEADERS = {
 HEADERS = BROWSER_HEADERS
 
 REDDIT_HEADERS = {
+    "Host": "www.reddit.com",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -45,7 +47,6 @@ REDDIT_HEADERS = {
     "Cookie": """edgebucket=AoQG1CTI7ePkpnsjQj; loid=00000000004c82x0fk.2.1565431000685.Z0FBQUFBQnF3bTJVT1J5Q1BDMXo4c2RhZXc1ZmhxaEthWEVwa1pXWlF4OWRFOXhUREhwT1Y3T0RzZm5RNHZKN3ZVV0JIT3RtOU11VEFUZzE5ejdlMDZpdzJJeGh1RFJyOFg5ZDg3OUFxSkdLWURMMUl5SjVYODdyN05yQllnNHd4V184US1Pa2hsNGo; session_tracker=rkgqlnrgopnneragrn.0.1791127191428.Z0FBQUFBQnF3bTZZNUJTR096RU1HM0hnWVNNNlZUN3I5c3lxajM1WEpTZGMycjhBRnBtQWJlQ2p2VzdzaE5NNGxsRmtORU1iSmZjWjNzNkNOODNCTXlUSlM0MVBjQmRaU0ZEMlRCQ1dUMFRjZlM3Zll1UjJEeDRCWEJQQ1FzcVk0c09qWEtVeERSSEk; csrf_token=4c08ff642e145c307bb232dbc9aafe14; csv=2; ads_cookie=1; reddit_supported_media_codecs=video/avc%2Cvideo/vp9; g_state={"i_l":2,"i_ll":1791126932491,"i_b":"ncICelz88H41YbWF+YU6XRGmdRqM3aHLnBNfKET5+AA","i_e":{"enable_itp_optimization":24},"i_et":1791126932491,"i_p":1791213313861}; token_v2=eyJhbGciOiJSUzI1NiIsImtpZCI6IlNIQTI1NjpzS3dsMnlsV0VtMjVmcXhwTU40cWY4MXE2OWFFdWFyMnpLMUdhVGxjdWNZIiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL3d3dy5yZWRkaXQuY29tIiwic3ViIjoidXNlciIsImV4cCI6MTc5MTIxMzMzMi4wNDk3MjYsImlhdCI6MTc5MTEyNjkzMi4wNDk3MjYsImp0aSI6Ilk0MTN5UnMtbDJOcENuUWdwSlYxVWFzb3Jkc3FkZyIsImNpZCI6IjBSLVdBTWh1b28tTXlRIiwibGlkIjoidDJfNGM4MngwZmsiLCJhaWQiOiJ0Ml80YzgyeDBmayIsImF0IjoxLCJsY2EiOjE1NjU0MzEwMDA2ODUsInNjcCI6ImVKeGtrVkhPM0RBSWhPX0NzMF9RcTFSVjVkaGtGelUyRWVDczl2WVZXWk9OOUw4TjhHVU1rOS1RcTJJbGctUktNRmRJZ0MzVEJnbDJJdS1Yd3FPZlJPODhlc0dHM1JRU0ZNRmE2WlRUWTkweUNTUjRraHJMR3hKUXhXNWtMamM2c09XZUh3Z0pHdGZDZmFYSHBVMW9HY2JpZG8xcldEV3VHMDlxN3RXNGRyYnB3dmJFLUdabnRTa1Z0X1dqVFBLNlV2a1VMX3JuTjdXM2p1VzdfUzUwWk1PR3F2bUIzcGxKQ080c2Zycm13OTlUazFGc0NGYTE5M2FTT3BaMjNxNWowU0swT0hkODF2UFhaakl1cDJsNVp2dDExeThodzF1ZTF6RHFBR2FzTVk4eXhwRjF6Szg2Z01ZVkpSdExFTjlHSUZjdWZfMlhZTDgyX1RtNGZlS0g3MGJjOVliZm1vRjZMa0djLWlWa0NIXy1Ed0FRMWVUUiIsInJjaWQiOiItVk85RTlTWEluNTBHZ2k3dDhVOUF5NE0tdG9Cdk9ZM2xiRUx5Q3lDNy1nIiwiZmxvIjoyfQ.ZQSOKbEx2H78CYZF07hG6vdFt0rxHNYwD24Osljr6Wp0k9z5pSYsxvTj_X17fBmkYP2nTflucWGarq64pb34MhJOWmDWQ41PN_k9TbEGWszsusKY1yyMxxhvxOLHPAW2vWYYzfeq3PEum4tidkC-a0Ni7tQXFnHVWFrbSfhxMTZvfJM72KHUmKLsDSdwgpyQaFlxnaz7YTURYlMVjjZnZ86IfhQttzOIelv3D1fiR50vlI2UTuFvvUfx2s11O9n6avUleUzKcJSGD7VrnIkE8N4kalx5NrcTI4oQmuUzVHR0xguzo2Kpyr2SL1Rhf5wCQfrVIL_t7nfRDyF8D54sXw; reddit_session=eyJhbGciOiJSUzI1NiIsImtpZCI6IlNIQTI1NjpsVFdYNlFVUEloWktaRG1rR0pVd1gvdWNFK01BSjBYRE12RU1kNzVxTXQ4IiwidHlwIjoiSldUIn0.eyJzdWIiOiJ0Ml80YzgyeDBmayIsImV4cCI6MTgwNjc2NTM0My44MzUyNjEsImlhdCI6MTc5MTEyNjk0My44MzUyNjEsImp0aSI6InBTNnlLVjhtaXVoazRfeU9FNEkySnFUelRVZ1ZhQSIsImF0IjoxLCJjaWQiOiJjb29raWUiLCJsY2EiOjE1NjU0MzEwMDA2ODUsInNjcCI6ImVKd0FBZ0Q5XzF0ZEF3QUJGUUM1IiwiZmxvIjoyLCJhbXIiOlsicHdkIl19.akuoMOaoIyYnUCbiUsimm4DFwQvCnqkC5c9_2fhn7fy8bD0gS6z2zMKPFcMpmgs9j2x1IZdHRPZ_XNX3vtCUgo4uNIBxXAAqAuFvNvBw478otwkD_ACBW1ji3z3grbCDIiwpvRXohjVeND8czSOah93-uAqbnA0AEETQ_Sr4i05Qo2h-lBFpMVIiBUA_qSjWClbSIHr925mtGfYSdfkxKmDmn3XJ4K9qNAJDEiluypWyRL1v8JUL6nOvx9vkvVwI-8jTICmEpouLyIfO_9TF3ExG_LYL0X_fzNaOuaQQbPrLRzmVzKDflxUrMnPjDTbgPfsvpjhCBgAsCnI10wZRNQ; reddit_chat_view=closed; pc=0l""",
     "Sec-GPC": "1",
     "Priority": "u=0, i",
-    "TE": "trailers"
 }
 
 
@@ -130,24 +131,109 @@ def google_news(url: str, feed: str, language: str) -> list[dict]:
     return signals
 
 
-def reddit(subreddit: str) -> list[dict]:
-    """Scrape subreddit posts using YARS with random user agent session and exponential backoff."""
-    import sys
-    from pathlib import Path
-    yars_path = Path(__file__).resolve().parents[2] / "YARS" / "src"
-    if str(yars_path) not in sys.path:
-        sys.path.insert(0, str(yars_path))
+def _flatten_reddit_comments(children: list[dict], limit: int) -> list[dict]:
+    comments = []
+    for child in children:
+        if len(comments) >= limit or child.get("kind") != "t1":
+            continue
+        comment = child.get("data", {})
+        body = comment.get("body") or ""
+        replies = comment.get("replies")
+        reply_children = replies.get("data", {}).get("children", []) if isinstance(replies, dict) else []
+        reply_count = sum(reply.get("kind") == "t1" for reply in reply_children)
+        if body and body not in {"[deleted]", "[removed]"}:
+            created = comment.get("created_utc")
+            comments.append({
+                "id": comment.get("id"),
+                "parent_id": comment.get("parent_id"),
+                "body": body,
+                "score": comment.get("score"),
+                "reply_count": reply_count,
+                "depth": comment.get("depth"),
+                "created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if created else None,
+                "url": "https://www.reddit.com" + comment.get("permalink", ""),
+            })
+        if reply_children and len(comments) < limit:
+            comments.extend(_flatten_reddit_comments(reply_children, limit - len(comments)))
+    return comments[:limit]
 
-    try:
-        from yars.sessions import RandomUserAgentSession
-        session = RandomUserAgentSession()
-    except Exception:
-        session = requests.Session()
 
-    response = session.get(
-        f"https://www.reddit.com/r/{subreddit}/hot.json?limit=40",
-        headers={**REDDIT_HEADERS},
-        timeout=15,
+def _reddit_retry_delay(response: requests.Response, retry_number: int, backoff_seconds: float) -> float:
+    retry_after = response.headers.get("Retry-After")
+    server_delay = None
+    if retry_after:
+        try:
+            server_delay = max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                server_delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    exponential_delay = backoff_seconds * (2 ** (retry_number - 1))
+    return max(server_delay or 0.0, exponential_delay)
+
+
+def _reddit_get(
+    session: requests.Session,
+    url: str,
+    *,
+    params: dict[str, int | str],
+    headers: dict[str, str],
+    retries: int,
+    retry_backoff_seconds: float,
+) -> requests.Response:
+    for attempt in range(retries + 1):
+        response = session.get(url, params=params, headers=headers, timeout=20)
+        if response.status_code not in {403, 429}:
+            response.raise_for_status()
+            return response
+        if attempt == retries:
+            response.raise_for_status()
+        delay = _reddit_retry_delay(response, attempt + 1, retry_backoff_seconds)
+        print(f"Reddit HTTP {response.status_code}; retry {attempt + 1}/{retries} in {delay:.1f}s", flush=True)
+        response.close()
+        time.sleep(delay)
+    raise RuntimeError("Reddit retry loop ended unexpectedly")
+
+
+def reddit(
+    subreddit: str,
+    limit: int = 40,
+    comment_limit: int = 0,
+    comment_depth: int = 2,
+    request_delay_seconds: float = 0,
+    sort: str = "hot",
+    time_filter: str = "day",
+    retries: int = 2,
+    retry_backoff_seconds: float = 5.0,
+) -> list[dict]:
+    """Fetch hot, new, or time-filtered top posts with optional comment samples."""
+    if sort not in {"hot", "new", "top"}:
+        raise ValueError("sort must be 'hot', 'new', or 'top'")
+    if time_filter not in {"hour", "day", "week", "month", "year", "all"}:
+        raise ValueError("time_filter must be hour, day, week, month, year, or all")
+    if not 0 <= retries <= 5:
+        raise ValueError("retries must be between 0 and 5")
+    if retry_backoff_seconds < 0.5:
+        raise ValueError("retry_backoff_seconds must be at least 0.5")
+    post_limit = min(max(limit, 1), 100)
+    sampled_comment_limit = min(max(comment_limit, 0), 100)
+    headers = REDDIT_HEADERS
+    session = requests.Session()
+    listing_params = {"limit": post_limit}
+    if sort == "top":
+        listing_params["t"] = time_filter
+    listing_name = f"top_{time_filter}" if sort == "top" else sort
+    response = _reddit_get(
+        session,
+        f"https://www.reddit.com/r/{subreddit}/{sort}.json",
+        params=listing_params,
+        headers=headers,
+        retries=retries,
+        retry_backoff_seconds=retry_backoff_seconds,
     )
     response.raise_for_status()
     signals = []
@@ -155,10 +241,62 @@ def reddit(subreddit: str) -> list[dict]:
         post = child.get("data", {})
         if post.get("stickied"):
             continue
-        signals.append({"source": "reddit", "feed": f"r/{subreddit}", "title": post.get("title", ""),
-                        "published_at": datetime.fromtimestamp(post.get("created_utc", 0), timezone.utc).isoformat(),
-                        "engagement": {"score": post.get("score"), "comments": post.get("num_comments")},
-                        "url": "https://www.reddit.com" + post.get("permalink", "")})
+        permalink = post.get("permalink", "")
+        comments = []
+        comment_status = "not_requested"
+        if sampled_comment_limit and post.get("num_comments", 0):
+            if request_delay_seconds > 0:
+                time.sleep(request_delay_seconds)
+            try:
+                comment_response = _reddit_get(
+                    session,
+                    f"https://www.reddit.com{permalink}.json",
+                    params={"limit": sampled_comment_limit, "depth": max(1, comment_depth), "sort": "top"},
+                    headers=headers,
+                    retries=retries,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                )
+                comment_response.raise_for_status()
+                payload = comment_response.json()
+                children = payload[1].get("data", {}).get("children", []) if len(payload) > 1 else []
+                comments = _flatten_reddit_comments(children, sampled_comment_limit)
+                comment_status = "fetched"
+            except requests.HTTPError as error:
+                if getattr(error.response, "status_code", None) in {403, 429}:
+                    raise
+                comment_status = f"unavailable:{type(error).__name__}"
+            except (IndexError, KeyError, TypeError, ValueError, requests.RequestException) as error:
+                comment_status = f"unavailable:{type(error).__name__}"
+        elif sampled_comment_limit:
+            comment_status = "no_comments"
+
+        signals.append({
+            "source": "reddit",
+            "feed": f"r/{subreddit}/{listing_name}",
+            "listing_sort": sort,
+            "listing_time_filter": time_filter if sort == "top" else None,
+            "post_id": post.get("id"),
+            "title": post.get("title", ""),
+            "published_at": datetime.fromtimestamp(post.get("created_utc", 0), timezone.utc).isoformat(),
+            "engagement": {
+                "score": post.get("score"),
+                "comments": post.get("num_comments"),
+                "upvote_ratio": post.get("upvote_ratio"),
+                "awards": post.get("total_awards_received"),
+                "crossposts": post.get("num_crossposts"),
+            },
+            "comment_sample": {
+                "requested": sampled_comment_limit,
+                "retrieved": len(comments),
+                "status": comment_status,
+            },
+            "comment_interactions": {
+                "score_total": sum(comment.get("score") or 0 for comment in comments),
+                "replies_total": sum(comment.get("reply_count") or 0 for comment in comments),
+            },
+            "comments": comments,
+            "url": "https://www.reddit.com" + permalink,
+        })
     return signals
 
 
@@ -166,6 +304,7 @@ def x_trends(country: str = "india", slots: int = 24) -> list[dict]:
     """X (Twitter) trending terms for the last ~24 hourly snapshots (trends24.in), with rank and persistence."""
     response = requests.get(f"https://trends24.in/{country}/", headers=BROWSER_HEADERS, timeout=20)
     response.raise_for_status()
+    response.encoding = "utf-8"  # trends24 sends no charset; requests would fall back to ISO-8859-1 and mangle Hindi
     link = re.compile(r'<a[^>]+href="https?://(?:twitter|x)\.com/search\?q=[^"]*"[^>]*>(.*?)</a>', re.S)
     terms: dict[str, dict] = {}
     blocks = [block.split("</ol>")[0] for block in re.split(r"<ol\b", response.text)[1:]][:slots]

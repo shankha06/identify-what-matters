@@ -24,7 +24,7 @@ class OpenRouterClientTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
             with patch("identify_what_matters.openrouter.requests.post", side_effect=[first, second]) as post:
-                result = OpenRouterClient().generate("prompt", "system")
+                result = OpenRouterClient(model="openai/gpt-6.1-sol").generate("prompt", "system")
 
         self.assertEqual(result.text, "final")
         self.assertEqual((result.input_tokens, result.output_tokens), (25, 10))

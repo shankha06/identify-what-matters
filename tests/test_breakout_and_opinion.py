@@ -1,9 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from instagrapi.exceptions import ChallengeRequired, PrivateAccount
-
-from identify_what_matters.instagrapi_client import CollectionAborted, ItemUnavailable, _FailClosedClient
+from identify_what_matters.hiker_client import CollectionAborted, ItemUnavailable, _HikerClient
 from identify_what_matters.proactive_radar import breakout_assessment
 from identify_what_matters.trends import measured_opinion
 
@@ -36,11 +34,18 @@ class BreakoutAssessmentTest(unittest.TestCase):
         self.assertLess(covered["score"], quiet["score"])
 
     def test_no_new_posts_in_a_day_is_settled(self):
-        media = [post("a", "u1", 30, 500, 9000, over=4, lift=2)]
+        media = [post("a", "u1", 30, 50, 900, over=1, lift=1)]
         self.assertEqual(breakout_assessment({"publishers": 0, "instagram": {"media": media}}, REF)["stage"], "settled")
 
+    def test_multiday_active_debate_is_simmering_not_settled(self):
+        # A topic active over 4 days (e.g. 28h, 70h, 96h) with multiple accounts and active comments
+        media = [post("a", "u1", 28, 200, 3000), post("b", "u2", 70, 150, 2500), post("c", "u3", 96, 120, 1800)]
+        res = breakout_assessment({"publishers": 0, "instagram": {"media": media}}, REF)
+        self.assertEqual(res["stage"], "simmering")
+        self.assertGreater(res["score"], 0)
+
     def test_brief_on_topic_filter_is_respected(self):
-        media = [post("a", "u1", 2, 180, 2000, over=5.2, lift=3.1), post("b", "u2", 40, 10, 100)]
+        media = [post("a", "u1", 2, 180, 2000, over=5.2, lift=3.1), post("b", "u2", 60, 10, 100)]
         topic = {"publishers": 0, "brief": {"on_topic_codes": ["b"]}, "instagram": {"media": media}}
         self.assertEqual(breakout_assessment(topic, REF)["stage"], "settled")
 
@@ -70,54 +75,50 @@ class MeasuredOpinionTest(unittest.TestCase):
 
 
 class ItemErrorTest(unittest.TestCase):
-    def _client(self, errors):
-        client = _FailClosedClient.__new__(_FailClosedClient)
+    def _client(self, responses):
+        client = _HikerClient.__new__(_HikerClient)
         client.failure, client.item_error_streak, client.before_request = None, 0, lambda: None
-        client.raw_medias, client.raw_users, client.last_json = {}, {}, {}
-        queue = list(errors)
+        queue = list(responses)
 
-        def fake_send(self_, endpoint, **kwargs):
-            error = queue.pop(0)
-            if error:
-                raise error
-            return {"ok": True}
-        return client, fake_send
+        def fake_request(self_, method, path, **kwargs):
+            return queue.pop(0)
+        return client, fake_request
 
-    def test_private_account_skips_without_aborting(self):
-        from instagrapi import Client
-        client, fake = self._client([PrivateAccount("Not authorized to view user"), None])
-        original = Client._send_private_request
-        Client._send_private_request = fake
+    def test_not_found_skips_without_aborting(self):
+        from hikerapi.base import BaseSyncClient
+        client, fake = self._client([{"exc_type": "UserNotFound", "detail": "x"}, {"ok": True}])
+        original = BaseSyncClient._request
+        BaseSyncClient._request = fake
         try:
             with self.assertRaises(ItemUnavailable):
-                client._send_private_request("feed/user/1/")
+                client._request("get", "/v1/user/by/username")
             self.assertIsNone(client.failure)
-            self.assertEqual(client._send_private_request("feed/user/2/"), {"ok": True})
+            self.assertEqual(client._request("get", "/v1/user/by/username"), {"ok": True})
             self.assertEqual(client.item_error_streak, 0)
         finally:
-            Client._send_private_request = original
+            BaseSyncClient._request = original
 
-    def test_streak_of_item_errors_and_challenges_abort(self):
-        from instagrapi import Client
-        client, fake = self._client([PrivateAccount("x")] * 4)
-        original = Client._send_private_request
-        Client._send_private_request = fake
+    def test_streak_of_item_errors_and_unclassified_errors_abort(self):
+        from hikerapi.base import BaseSyncClient
+        client, fake = self._client([{"exc_type": "UserNotFound"}] * 4)
+        original = BaseSyncClient._request
+        BaseSyncClient._request = fake
         try:
             for _ in range(3):
                 with self.assertRaises(ItemUnavailable):
-                    client._send_private_request("feed/user/1/")
+                    client._request("get", "/v1/user/by/username")
             with self.assertRaises(CollectionAborted):
-                client._send_private_request("feed/user/1/")
+                client._request("get", "/v1/user/by/username")
             self.assertIsNotNone(client.failure)
         finally:
-            Client._send_private_request = original
-        client, fake = self._client([ChallengeRequired("challenge")])
-        Client._send_private_request = fake
+            BaseSyncClient._request = original
+        client, fake = self._client([{"exc_type": "RateLimitError", "detail": "slow down"}])
+        BaseSyncClient._request = fake
         try:
             with self.assertRaises(CollectionAborted):
-                client._send_private_request("feed/user/1/")
+                client._request("get", "/v1/user/by/username")
         finally:
-            Client._send_private_request = original
+            BaseSyncClient._request = original
 
 
 if __name__ == "__main__":
