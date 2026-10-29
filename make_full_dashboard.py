@@ -2953,6 +2953,8 @@ html_content = f"""<!DOCTYPE html>
       const hasStance = (sup + crit + neu + hum) > 0;
 
       const sides = (t.measured_opinion && t.measured_opinion.sides) || [];
+      const opinionSens = t.measured_opinion && t.measured_opinion.weighting_sensitivity;
+      const exposureFlag = !!(opinionSens && opinionSens.flag);
       const pi = t.political_intel || {{}};
       const demo = t.demo || {{}};
 
@@ -3291,16 +3293,17 @@ html_content = f"""<!DOCTYPE html>
 
                 ${{sides.length > 0 ? `
                   <div style="margin-top: 10px;">
-                    <div style="font-size: 10.5px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Debate Positions:</div>
+                    <div style="font-size: 10.5px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Debate Positions (share of commenters on panel accounts, not public opinion):</div>
                     ${{sides.map((s, idx) => `
                       <div class="side-card">
                         <div class="side-header">
-                          <span>Side #${{idx+1}}</span>
-                          <span>Position</span>
+                          <span>Side #${{idx+1}} &middot; ${{Math.round((s.share || 0) * 100)}}%${{s.share_ci ? ' (95% CI ' + Math.round(s.share_ci[0] * 100) + '&ndash;' + Math.round(s.share_ci[1] * 100) + '%)' : ''}}</span>
+                          <span>${{s.comments || 0}} comments</span>
                         </div>
                         <div class="side-text">${{s.position}}</div>
                       </div>
                     `).join('')}}
+                    ${{exposureFlag ? '<div style="font-size:11px; color:var(--warn); margin-top:6px;">Caution: shares change by 15+ points when likes are ignored. The like-weighted split may reflect a few highly liked comments.</div>' : ''}}
                   </div>
                 ` : '<div style="font-size:11.5px; color:var(--text-faint); margin-top:8px;">General social conversation without factional polarization.</div>'}}
               </div>

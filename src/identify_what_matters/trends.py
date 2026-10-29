@@ -454,6 +454,51 @@ async def probe(topic: dict, transport, reference: datetime | None = None, max_q
     return {"media": media, "queries_used": used, "hashtag_counts": hashtag_counts}
 
 
+# Max absolute gap between like-weighted and unweighted shares that marks the opinion as exposure-sensitive.
+EXPOSURE_GAP_FLAG = 0.15
+_TONES = {"type": "string", "enum": ["supportive", "critical", "humorous", "neutral"]}
+_FRACTION = {"type": "number"}
+BRIEF_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["on_topic", "discussion_level", "summary", "what_people_say", "stance", "why_trending",
+                 "caution", "debate", "comment_labels", "political_framing"],
+    "properties": {
+        "on_topic": {"type": "array", "items": {"type": "integer"}},
+        "discussion_level": {"type": "string", "enum": ["none", "low", "medium", "high"]},
+        "summary": {"type": "string"},
+        "what_people_say": {"type": "array", "items": {"type": "string"}},
+        "stance": {"type": "object", "additionalProperties": False,
+                   "required": ["supportive", "critical", "humorous", "neutral"],
+                   "properties": {k: _FRACTION for k in ["supportive", "critical", "humorous", "neutral"]}},
+        "why_trending": {"type": "string"},
+        "caution": {"type": ["string", "null"]},
+        "debate": {"type": "object", "additionalProperties": False,
+                   "required": ["is_debate", "question", "sides", "intensity"],
+                   "properties": {
+                       "is_debate": {"type": "boolean"},
+                       "question": {"type": "string"},
+                       "sides": {"type": "array", "items": {
+                           "type": "object", "additionalProperties": False,
+                           "required": ["position", "share", "example"],
+                           "properties": {"position": {"type": "string"}, "share": _FRACTION,
+                                          "example": {"type": "string"}}}},
+                       "intensity": {"type": "string", "enum": ["low", "medium", "high"]}}},
+        "comment_labels": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["c", "tone", "sarcastic", "side", "off_topic"],
+            "properties": {"c": {"type": "integer"}, "tone": _TONES, "sarcastic": {"type": "boolean"},
+                           "side": {"type": ["integer", "null"]}, "off_topic": {"type": "boolean"}}}},
+        "political_framing": {"type": "object", "additionalProperties": False,
+                              "required": ["direction", "confidence", "basis"],
+                              "properties": {
+                                  "direction": {"type": "string", "enum": [
+                                      "pro_incumbent", "anti_incumbent", "pro_opposition",
+                                      "anti_opposition", "neutral"]},
+                                  "confidence": _FRACTION, "basis": {"type": "string"}}},
+    },
+}
+
+
 def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, comment_pool_size: int = 120) -> dict:
     by_age = sorted(topic.get("instagram", {}).get("media", []),
                     key=lambda m: hours_since(m["taken_at"], reference) or 1e9)
@@ -515,7 +560,8 @@ def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, co
         '"off_topic": false}], '
         '"political_framing": {"direction": "neutral", "confidence": 0.0, "basis": ""}}'
     )
-    result = llm.json(prompt, SYSTEM, validate=_require("summary", "on_topic", "discussion_level"))
+    result = llm.json(prompt, SYSTEM, validate=_require("summary", "on_topic", "discussion_level"),
+                      schema=BRIEF_SCHEMA)
     result["on_topic_codes"] = [media[i]["code"] for i in result.get("on_topic", []) if isinstance(i, int) and 0 <= i < len(media)]
     opinion = measured_opinion(result, pool)
     if opinion:
@@ -528,6 +574,22 @@ def brief(topic: dict, llm, reference: datetime, comments_per_post: int = 25, co
     return result
 
 
+def _effective_n(weights: list[float]) -> float:
+    """Kish effective sample size (sum w)^2 / sum w^2; equals n for equal weights."""
+    squares = sum(w * w for w in weights)
+    return sum(weights) ** 2 / squares if squares else 0.0
+
+
+def _wilson_interval(p: float, n: float, z: float = 1.96) -> tuple[float, float] | None:
+    """95% Wilson score interval; Wald intervals overshoot 0-1 and collapse near the bounds."""
+    if n <= 0:
+        return None
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return round(max(0.0, centre - half), 3), round(min(1.0, centre + half), 3)
+
+
 def measured_opinion(result: dict, pool: list[dict]) -> dict | None:
     """Like-weighted shares from per-comment labels: what commenters actually say, not the LLM's overall impression."""
     labels = {item["c"]: item for item in result.get("comment_labels") or []
@@ -536,6 +598,7 @@ def measured_opinion(result: dict, pool: list[dict]) -> dict | None:
         return None
     sides = [s for s in ((result.get("debate") or {}).get("sides") or []) if isinstance(s, dict) and s.get("position")]
     tones, side_weight, quotes, sarcastic, used = Counter(), Counter(), {}, 0, 0
+    all_weights, aligned_weights = [], []
     for index, label in labels.items():
         if label.get("off_topic"):
             continue
@@ -544,26 +607,65 @@ def measured_opinion(result: dict, pool: list[dict]) -> dict | None:
         used += 1
         tone = label.get("tone") if label.get("tone") in ("supportive", "critical", "humorous", "neutral") else "neutral"
         tones[tone] += weight
+        all_weights.append(weight)
         sarcastic += bool(label.get("sarcastic"))
         side = label.get("side")
         if isinstance(side, int) and 0 <= side < len(sides):
             side_weight[side] += weight
+            aligned_weights.append(weight)
             best = quotes.get(side)
             if best is None or (comment.get("like_count") or 0) > (best.get("like_count") or 0):
                 quotes[side] = comment
     if not used:
         return None
     tone_total, side_total = sum(tones.values()), sum(side_weight.values())
+    tone_keys = ("supportive", "critical", "humorous", "neutral")
+
+    # Exposure-bias sensitivity: the same labels counted once per comment, without like weighting.
+    # Reported only; the weighted shares above remain the default.
+    plain_tones, plain_sides = _tone_and_side_totals(labels, pool, sides, lambda comment: 1.0)
+    plain_tone_total, plain_side_total = sum(plain_tones.values()), sum(plain_sides.values())
+    tone_gap = max(abs(tones[k] / tone_total - plain_tones[k] / plain_tone_total) for k in tone_keys)
+    side_gap = max((abs(side_weight[i] / side_total - plain_sides[i] / plain_side_total)
+                    for i in range(len(sides))), default=0.0) if side_total and plain_side_total else 0.0
+    gap = round(max(tone_gap, side_gap), 2)
+
+    # Intervals use the effective n of the weighted labels, so heavy-liked comments do not overstate precision.
+    n_eff, side_n_eff = _effective_n(all_weights), _effective_n(aligned_weights)
     return {
-        "comments": used, "sarcastic": sarcastic,
-        "tone": {k: round(tones[k] / tone_total, 2) for k in ("supportive", "critical", "humorous", "neutral")},
+        "comments": used, "sarcastic": sarcastic, "effective_n": round(n_eff, 1),
+        "tone": {k: round(tones[k] / tone_total, 2) for k in tone_keys},
+        "tone_ci": {k: _wilson_interval(tones[k] / tone_total, n_eff) for k in tone_keys},
         "sides": [{"position": sides[i]["position"], "share": round(side_weight[i] / side_total, 2) if side_total else 0.0,
+                   "share_ci": _wilson_interval(side_weight[i] / side_total, side_n_eff) if side_total else None,
                    "comments": sum(1 for l in labels.values() if l.get("side") == i and not l.get("off_topic")),
                    "top_comment": scrub(quotes[i]["text"])[:180] if i in quotes else None,
                    "top_comment_likes": quotes[i].get("like_count") if i in quotes else None}
                   for i in range(len(sides))],
         "unaligned_share": round(1 - side_total / tone_total, 2) if sides and tone_total else None,
+        "weighting_sensitivity": {
+            "max_gap": gap,
+            "flag": gap >= EXPOSURE_GAP_FLAG,
+            "unweighted_tone": {k: round(plain_tones[k] / plain_tone_total, 2) for k in tone_keys},
+            "unweighted_sides": [round(plain_sides[i] / plain_side_total, 2) if plain_side_total else 0.0
+                                 for i in range(len(sides))],
+        },
     }
+
+
+def _tone_and_side_totals(labels: dict, pool: list[dict], sides: list[dict], weight_of) -> tuple[Counter, Counter]:
+    """Tone and side totals over non-off-topic labels, using the supplied per-comment weight."""
+    tones, side_weight = Counter(), Counter()
+    for index, label in labels.items():
+        if label.get("off_topic"):
+            continue
+        weight = weight_of(pool[index])
+        tone = label.get("tone") if label.get("tone") in ("supportive", "critical", "humorous", "neutral") else "neutral"
+        tones[tone] += weight
+        side = label.get("side")
+        if isinstance(side, int) and 0 <= side < len(sides):
+            side_weight[side] += weight
+    return tones, side_weight
 
 
 # ---------------------------------------------------------------- metrics, history, status

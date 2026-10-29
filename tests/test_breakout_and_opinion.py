@@ -73,6 +73,43 @@ class MeasuredOpinionTest(unittest.TestCase):
     def test_missing_labels_returns_none(self):
         self.assertIsNone(measured_opinion({"comment_labels": []}, [{"text": "x"}]))
 
+    def test_side_shares_carry_wilson_intervals_and_effective_n(self):
+        pool = [{"text": f"c{i}", "like_count": 10 * i} for i in range(6)]
+        result = {"debate": {"sides": [{"position": "A"}, {"position": "B"}]},
+                  "comment_labels": [{"c": i, "tone": "critical", "side": i % 2} for i in range(6)]}
+        opinion = measured_opinion(result, pool)
+        for side in opinion["sides"]:
+            lo, hi = side["share_ci"]
+            self.assertLessEqual(lo, side["share"])
+            self.assertGreaterEqual(hi, side["share"])
+            self.assertTrue(0.0 <= lo <= hi <= 1.0)
+        self.assertLessEqual(opinion["effective_n"], 6)
+        self.assertIn("critical", opinion["tone_ci"])
+
+
+class WilsonIntervalTest(unittest.TestCase):
+    def test_bounds_stay_in_unit_interval_at_extremes(self):
+        from identify_what_matters.trends import _wilson_interval
+        self.assertEqual(_wilson_interval(0.0, 20)[0], 0.0)
+        self.assertLess(_wilson_interval(0.0, 20)[1], 0.2)   # no zero-width interval at p=0
+        self.assertEqual(_wilson_interval(1.0, 20)[1], 1.0)
+        self.assertGreater(_wilson_interval(1.0, 20)[0], 0.8)
+
+    def test_matches_known_value(self):
+        from identify_what_matters.trends import _wilson_interval
+        lo, hi = _wilson_interval(0.5, 100)
+        self.assertAlmostEqual(lo, 0.404, places=3)
+        self.assertAlmostEqual(hi, 0.596, places=3)
+
+    def test_no_interval_without_effective_n(self):
+        from identify_what_matters.trends import _wilson_interval
+        self.assertIsNone(_wilson_interval(0.5, 0))
+
+    def test_kish_effective_n_never_exceeds_n(self):
+        from identify_what_matters.trends import _effective_n
+        self.assertAlmostEqual(_effective_n([1.0, 1.0, 1.0, 1.0]), 4.0)
+        self.assertLess(_effective_n([1.0, 1.0, 1.0, 50.0]), 4.0)
+
 
 class ItemErrorTest(unittest.TestCase):
     def _client(self, responses):

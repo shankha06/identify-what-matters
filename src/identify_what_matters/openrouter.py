@@ -31,6 +31,7 @@ class OpenRouterResponse:
     text: str
     input_tokens: int
     output_tokens: int
+    truncated: bool = False
 
 
 class OpenRouterClient:
@@ -51,7 +52,8 @@ class OpenRouterClient:
     def _uses_reasoning(self) -> bool:
         return any(self.model.startswith(m) or self.model == m for m in _REASONING_MODELS)
 
-    def _complete(self, messages: list[dict[str, Any]], timeout: int) -> dict[str, Any]:
+    def _complete(self, messages: list[dict[str, Any]], timeout: int,
+                  max_tokens: int | None = None, response_schema: dict | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -60,8 +62,14 @@ class OpenRouterClient:
             payload["reasoning"] = {"enabled": True}
         if self.temperature is not None:
             payload["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            payload["max_tokens"] = self.max_tokens
+        cap = max_tokens if max_tokens is not None else self.max_tokens
+        if cap is not None:
+            payload["max_tokens"] = cap
+        if response_schema is not None:
+            payload["response_format"] = {"type": "json_schema",
+                                          "json_schema": {"name": "response", "strict": True, "schema": response_schema}}
+            payload["provider"] = {"require_parameters": True}
+            payload["plugins"] = [{"id": "response-healing"}]
 
         for attempt in range(4):
             response = requests.post(
@@ -82,13 +90,14 @@ class OpenRouterClient:
         return response.json()
 
     def generate(self, user_prompt: str, system_instruction: str = "",
-                 request_timeout: int = 150) -> OpenRouterResponse:
+                 request_timeout: int = 150, response_schema: dict | None = None,
+                 max_tokens: int | None = None) -> OpenRouterResponse:
         messages: list[dict[str, Any]] = []
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": user_prompt})
 
-        first = self._complete(messages, request_timeout)
+        first = self._complete(messages, request_timeout, max_tokens, response_schema)
         first_message = first["choices"][0]["message"]
         first_usage = first.get("usage") or {}
 
@@ -101,17 +110,19 @@ class OpenRouterClient:
                 assistant_turn,
                 {"role": "user", "content": "Review your answer carefully. Follow the original instructions and return only the final answer."},
             ])
-            second = self._complete(messages, request_timeout)
+            second = self._complete(messages, request_timeout, max_tokens, response_schema)
             second_message = second["choices"][0]["message"]
             second_usage = second.get("usage") or {}
             return OpenRouterResponse(
                 text=second_message.get("content") or "",
                 input_tokens=(first_usage.get("prompt_tokens", 0) or 0) + (second_usage.get("prompt_tokens", 0) or 0),
                 output_tokens=(first_usage.get("completion_tokens", 0) or 0) + (second_usage.get("completion_tokens", 0) or 0),
+                truncated=second["choices"][0].get("finish_reason") == "length",
             )
 
         return OpenRouterResponse(
             text=first_message.get("content") or "",
             input_tokens=first_usage.get("prompt_tokens", 0) or 0,
             output_tokens=first_usage.get("completion_tokens", 0) or 0,
+            truncated=first["choices"][0].get("finish_reason") == "length",
         )

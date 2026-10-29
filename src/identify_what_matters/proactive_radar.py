@@ -3,7 +3,7 @@
 Instead of waiting for Google News RSS or Google Trends to report what already happened
 (which lags Instagram debate by 6-36 hours), this module drives discovery *bottom-up*
 from native Instagram signals:
-1. Sentinel Panel Post Velocity & Ratio Deviation (dC/dt, ratio lift > 3σ)
+1. Sentinel Panel Post Velocity & Ratio Deviation (dC/dt, ratio lift vs. account baseline, Poisson comment bursts)
 2. Bottom-up Vernacular Entity & Keyword Mining from fast-moving comment trees
 3. 1-hop Autonomous Snowball Probing on surging entities (without pre-baked keywords)
 4. Predictive Lifecycle Categorization (spark vs breakout vs saturated)
@@ -69,9 +69,58 @@ POLITICAL_CIVIC_PATTERNS = re.compile(
 )
 
 
+BURST_WINDOW_HOURS = 2.0
+BURST_HISTORY_HOURS = 24.0
+BURST_ALPHA = 0.01
+BURST_MIN_WINDOW_COMMENTS = 5
+BURST_MIN_COMMENTS = 10
+BURST_RATE_FLOOR = 0.5  # expected comments per window when history is empty
+
+
+def _poisson_sf(k: int, lam: float) -> float:
+    """P(X >= k) for X ~ Poisson(lam)."""
+    if k <= 0:
+        return 1.0
+    term = math.exp(-lam)
+    cdf = term
+    for i in range(1, k):
+        term *= lam / i
+        cdf += term
+    return max(0.0, 1.0 - cdf)
+
+
+def comment_burst(comment_ages_hours: list[float]) -> dict:
+    """Poisson burst test on comment arrival times.
+
+    Counts comments in the last BURST_WINDOW_HOURS and compares them with the arrival rate
+    observed over the preceding history window. A burst is flagged when the recent count is
+    improbable under that rate (upper-tail Poisson p-value below BURST_ALPHA). Ages come from
+    the sampled comments, so counts are lower bounds and the test is conservative.
+    """
+    ages = [a for a in comment_ages_hours if a is not None and a >= 0]
+    if len(ages) < BURST_MIN_COMMENTS:
+        return {"is_burst": False, "recent": 0, "expected": None, "p_value": None, "sampled": len(ages)}
+    recent = sum(1 for a in ages if a <= BURST_WINDOW_HOURS)
+    history = sum(1 for a in ages if BURST_WINDOW_HOURS < a <= BURST_HISTORY_HOURS)
+    history_rate = history / (BURST_HISTORY_HOURS - BURST_WINDOW_HOURS)
+    expected = max(BURST_RATE_FLOOR, history_rate * BURST_WINDOW_HOURS)
+    p_value = _poisson_sf(recent, expected)
+    return {
+        "is_burst": recent >= BURST_MIN_WINDOW_COMMENTS and p_value < BURST_ALPHA,
+        "recent": recent,
+        "expected": round(expected, 2),
+        "p_value": p_value,
+        "sampled": len(ages),
+    }
+
+
 def calculate_velocity_signals(media_item: dict, reference: datetime,
                                 account_baseline: dict | None = None) -> dict:
-    """Calculate early comment velocity (dC/dt), like velocity, ratio shock (3σ deviation), and political boost."""
+    """Calculate early comment velocity (dC/dt), like velocity, ratio lift, political boost, and comment bursts.
+
+    The fixed threshold rules are kept as the fallback. A Poisson burst test over sampled comment
+    arrival times adds a second, rate-relative trigger when enough comments are available.
+    """
     age_hours = hours_since(media_item.get("taken_at"), reference) or 1.0
     comments = float(media_item.get("comment_count") or 0)
     likes = float(media_item.get("like_count") or 0)
@@ -112,10 +161,14 @@ def calculate_velocity_signals(media_item: dict, reference: datetime,
         * recency_boost * political_boost
     )
 
+    burst = comment_burst([hours_since(c.get("created_at"), reference)
+                           for c in (media_item.get("comments") or []) if isinstance(c, dict)])
+
     is_flame = (
         (age_hours <= 8 and comment_velocity >= 20 and ratio_deviation >= 1.8)
         or (comment_acceleration >= 3.0 and comments >= 80)
         or (has_political_affinity and comment_velocity >= 15 and ratio_deviation >= 1.5)
+        or burst["is_burst"]
     )
 
     return {
@@ -126,6 +179,8 @@ def calculate_velocity_signals(media_item: dict, reference: datetime,
         "ratio_deviation": round(ratio_deviation, 2),
         "proactive_score": round(proactive_score, 3),
         "is_flame": is_flame,
+        "is_burst": burst["is_burst"],
+        "burst": burst,
         "is_political": has_political_affinity,
     }
 

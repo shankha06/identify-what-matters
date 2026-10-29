@@ -36,6 +36,7 @@ class LLMResponse:
     text: str
     input_tokens: int
     output_tokens: int
+    truncated: bool = False
 
 
 class GatewayClientWrapper:
@@ -62,7 +63,9 @@ class GatewayClientWrapper:
         )
 
     def generate(self, user_prompt: str, system_instruction: str = "",
-                 request_timeout: int = 150) -> LLMResponse:
+                 request_timeout: int = 150, response_schema: dict | None = None,
+                 max_tokens: int | None = None) -> LLMResponse:
+        # Gateway does not expose schema or token-cap overrides; the local validator still applies.
         resp = self.client.generate(
             user_prompt=user_prompt,
             system_instruction=system_instruction,
@@ -106,22 +109,43 @@ class LLM:
         self.model = getattr(self.client, "model", model or DEFAULT_GATEWAY_MODEL)
 
     def json(self, prompt: str, system: str, validate: Callable[[Any], Any] | None = None,
-             timeout: int = 150) -> Any:
-        """One cached call returning parsed JSON; one corrective retry on malformed output."""
-        key = hashlib.sha256(f"{self.model}\n{system}\n{prompt}".encode()).hexdigest()
+             timeout: int = 150, schema: dict | None = None) -> Any:
+        """One cached call returning parsed JSON; corrective retries on malformed or truncated output."""
+        # Schema is part of the key only when given, so existing cache entries stay valid.
+        schema_part = f"\nschema:{json.dumps(schema, sort_keys=True)}" if schema is not None else ""
+        key = hashlib.sha256(f"{self.model}\n{system}\n{prompt}{schema_part}".encode()).hexdigest()
         cached = self.cache_dir / f"{key}.json"
         if cached.exists():
             with self._lock:
                 self.cached += 1
             return json.loads(cached.read_text())
         last_error = None
+        cap = None
         for attempt in range(3):
             with self._lock:
                 if self.calls + 2 > self.max_calls:
                     raise RuntimeError(f"LLM call budget {self.max_calls} exhausted")
                 self.calls += 2
-            suffix = "" if attempt == 0 else "\n\nYour previous answer was not valid JSON for the schema. Return ONLY the JSON."
-            response = self.client.generate(prompt + suffix, system_instruction=system, request_timeout=timeout)
+            if attempt == 0:
+                suffix = ""
+            elif last_error is not None and "truncated" in str(last_error):
+                suffix = "\n\nYour previous answer was cut off. Return the complete JSON, more concisely."
+            else:
+                suffix = "\n\nYour previous answer was not valid JSON for the schema. Return ONLY the JSON."
+            kwargs: dict[str, Any] = {"system_instruction": system, "request_timeout": timeout}
+            if schema is not None:
+                kwargs["response_schema"] = schema
+            if cap is not None:
+                kwargs["max_tokens"] = cap
+            response = self.client.generate(prompt + suffix, **kwargs)
+            if getattr(response, "truncated", False):
+                # Output hit the token cap; double it for the next attempt (bounded).
+                cap = min((cap or getattr(self.client, "max_tokens", 8192) or 8192) * 2, 32768)
+                last_error = ValueError("response truncated at token cap")
+                with self._lock:
+                    self.input_tokens += response.input_tokens or 0
+                    self.output_tokens += response.output_tokens or 0
+                continue
             with self._lock:
                 self.input_tokens += response.input_tokens or 0
                 self.output_tokens += response.output_tokens or 0
