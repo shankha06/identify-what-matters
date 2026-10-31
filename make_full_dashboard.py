@@ -210,14 +210,10 @@ issue_cluster_stats = {c: {
 # Which pipeline tasks are running on a real trained model right now vs. keyword fallback - shown in the
 # Undercurrent Intel tab so the dashboard is honest about its own current sophistication.
 models_status = polclf.models_available()
-try:
-    from src.identify_what_matters.strategic_classifier import load_strategic_model
-    s_mod, _, _ = load_strategic_model()
-    models_status["strategic_threat_radar"] = (s_mod is not None)
-    models_status["neural_criticality"] = (s_mod is not None)
-except Exception:
-    models_status["strategic_threat_radar"] = False
-    models_status["neural_criticality"] = False
+_strat_dir = Path(__file__).resolve().parent / "artifacts" / "strategic_models"
+_has_strat = any((_strat_dir / f"strategic_mdeberta_v{v}").exists() for v in (4, 3, 2, 1))
+models_status["strategic_threat_radar"] = _has_strat
+models_status["neural_criticality"] = _has_strat
 
 def infer_topic_mental_state(t, pool=None):
     brief = t.get('brief') or {}
@@ -500,28 +496,95 @@ from src.identify_what_matters.demographics import prewarm_neural_demographics, 
 from src.identify_what_matters.political_pulse import prewarm_party_neural as prewarm_pulse_party
 _neural_texts = []
 for _t in topics:
-    _neural_texts += [str(c.get('text') or '') for c in ((_t.get('brief') or {}).get('comment_pool') or [])]
-    _neural_texts += [str(c.get('text') or '') for c in ((_t.get('reddit_proxy') or {}).get('comment_excerpts') or [])]
+    _pool = ((_t.get('brief') or {}).get('comment_pool') or [])[:15]
+    _neural_texts += [str(c.get('text') or '') for c in _pool]
+    _r_pool = ((_t.get('reddit_proxy') or {}).get('comment_excerpts') or [])[:10]
+    _neural_texts += [str(c.get('text') or '') for c in _r_pool]
+
+_neural_unique = list(dict.fromkeys(t for t in _neural_texts if t and t.strip()))
 try:
-    import torch
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    prewarm_neural_demographics(_neural_texts, batch_size=32)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    prewarm_demo_party(_neural_texts, batch_size=32)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    prewarm_pulse_party(_neural_texts, batch_size=32)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print(f'[dashboard] batched neural prewarm over {len(set(_neural_texts))} unique comment texts')
+    prewarm_neural_demographics(_neural_unique, batch_size=16)
 except Exception as _error:
-    print(f'[dashboard] batched neural prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
+    print(f'[dashboard] demographic prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
+
+try:
+    prewarm_demo_party(_neural_unique, batch_size=16)
+except Exception as _error:
+    print(f'[dashboard] demo party prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
+
+try:
+    prewarm_pulse_party(_neural_unique, batch_size=16)
+except Exception as _error:
+    print(f'[dashboard] pulse party prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
+print(f'[dashboard] batched neural prewarm over {len(_neural_unique)} unique comment texts')
+
+def _get_topic_summary_and_why(t: dict) -> tuple[str, str, list]:
+    brief = t.get('brief') or {}
+    headlines = t.get('headlines') or []
+    entities = t.get('entities') or []
+    title = t.get('title', 'Untitled')
+    scores = t.get('scores') or {}
+    reasons = (t.get('breakout') or {}).get('reasons', [])
+    languages_raw = t.get('languages') or []
+    ig = t.get('instagram_metrics') or {}
+    reddit_proxy = t.get('reddit_proxy') or {}
+    matched_reddit = reddit_proxy.get('threads', [])
+
+    matched_articles = []
+    for h in headlines:
+        if h in signals_by_title:
+            art = signals_by_title[h]
+            matched_articles.append({
+                'title': art.get('title'),
+                'publisher': art.get('publisher') or 'News Outlet',
+                'url': art.get('url'),
+                'source': art.get('feed') or art.get('source') or 'news'
+            })
+
+    summary = brief.get('summary', '') if brief else ''
+    if not summary:
+        ents_str = ', '.join(entities[:3]) if entities else ''
+        if matched_articles:
+            best_art = max(matched_articles, key=lambda a: len(a.get('title', '')))
+            lead_headline = best_art.get('title')
+            pub = best_art.get('publisher') or 'major press wires'
+            summary = f"{lead_headline}. Tracked via {pub} and multi-lingual regional coverage"
+            summary += f", centering on {ents_str}." if ents_str else "."
+        elif matched_reddit:
+            lead_r = matched_reddit[0]
+            summary = f"{lead_r['title']}. Active debate on {lead_r['feed']} with {lead_r['comments']} comments and {lead_r['score']} upvotes."
+        elif headlines:
+            summary = f"{headlines[0]}. Developing story circulating across national public search and news reporting."
+        else:
+            summary = f"Civic conversation and search activity around {title.lower()}, under observation across regional streams."
+
+    why_trending = brief.get('why_trending', '') if brief else ''
+    if not why_trending:
+        if matched_reddit and (matched_reddit[0]['comments'] > 15 or matched_reddit[0]['score'] > 200):
+            lead_r = matched_reddit[0]
+            why_trending = f"High engagement discussion thread in {lead_r['feed']} (⬆️ {lead_r['score']:,} upvotes, 💬 {lead_r['comments']:,} comments)."
+        elif reasons:
+            why_trending = '; '.join(reasons)
+        elif scores.get('news_heat', 0) > 1.5:
+            pub_cnt = t.get('publishers', len(matched_articles) or 2)
+            lang_cnt = len(languages_raw) or 1
+            why_trending = f"Multi-source news surge across {pub_cnt} publishers in {lang_cnt} regional language{'s' if lang_cnt > 1 else ''}."
+        elif scores.get('search_heat', 0) > 1.5:
+            ent_lead = entities[0] if entities else title
+            why_trending = f"High search volume velocity and rapid public query surge around {ent_lead}."
+        elif ig.get('on_topic_posts', 0) > 0:
+            why_trending = f"Social engagement acceleration across verified community posts and discussion threads."
+        else:
+            why_trending = f"Sustained civic interest monitored across real-time regional indicators."
+
+    return summary, why_trending, matched_articles
 
 from src.identify_what_matters.strategic_classifier import classify_strategic_batch
 try:
-    _all_topic_texts = [f"{_t.get('title', '')}. {(_t.get('brief') or {}).get('summary', '')}" for _t in topics]
+    _all_topic_texts = []
+    for _t in topics:
+        _s, _, _ = _get_topic_summary_and_why(_t)
+        _all_topic_texts.append(f"{_t.get('title', '')}. {_s}".strip())
     _strategic_results = classify_strategic_batch(_all_topic_texts, batch_size=32)
     for _t, _s_res in zip(topics, _strategic_results):
         _t['neural_strategic'] = _s_res
@@ -529,19 +592,21 @@ try:
 except Exception as _e:
     print(f'[dashboard] strategic batch skipped: {_e}')
 
+from src.identify_what_matters.undercurrent_scoring import _caption_text
 from src.identify_what_matters.political_classifier import prewarm_political_transformers
 try:
     _topic_combined_texts = []
     for _t in topics:
-        _t_brief = _t.get('brief') or {}
-        _t_sum = _t_brief.get('summary', '')
-        _t_why = _t_brief.get('why_trending', '')
+        _s, _w, _ = _get_topic_summary_and_why(_t)
         _t_parts = [_t.get('title', '')]
-        if _t_sum:
-            _t_parts.append(_t_sum)
-        if _t_why:
-            _t_parts.append(_t_why)
+        if _s:
+            _t_parts.append(_s)
+        if _w:
+            _t_parts.append(_w)
         _topic_combined_texts.append(". ".join(_t_parts))
+        _cap = _caption_text(_t)
+        if _cap:
+            _topic_combined_texts.append(_cap)
     prewarm_political_transformers(_topic_combined_texts, batch_size=32)
     print(f'[dashboard] batched political transformers over {len(_topic_combined_texts)} topics')
 except Exception as _e:
@@ -569,59 +634,11 @@ for idx, t in enumerate(topics):
     ig = t.get('instagram_metrics') or {}
     brief = t.get('brief')
 
-    # Collect matched news/search articles for provenance
-    matched_articles = []
-    for h in headlines:
-        if h in signals_by_title:
-            art = signals_by_title[h]
-            matched_articles.append({
-                'title': art.get('title'),
-                'publisher': art.get('publisher') or 'News Outlet',
-                'url': art.get('url'),
-                'source': art.get('feed') or art.get('source') or 'news'
-            })
-
     reddit_proxy = t.get('reddit_proxy') or {}
     matched_reddit = reddit_proxy.get('threads', [])
     reddit_comments_total = reddit_proxy.get('post_comments', 0)
     
-    # 1. Enriched Summary
-    summary = brief.get('summary', '') if brief else ''
-    if not summary:
-        ents_str = ', '.join(entities[:3]) if entities else ''
-        if matched_articles:
-            best_art = max(matched_articles, key=lambda a: len(a.get('title', '')))
-            lead_headline = best_art.get('title')
-            pub = best_art.get('publisher') or 'major press wires'
-            summary = f"{lead_headline}. Tracked via {pub} and multi-lingual regional coverage"
-            summary += f", centering on {ents_str}." if ents_str else "."
-        elif matched_reddit:
-            lead_r = matched_reddit[0]
-            summary = f"{lead_r['title']}. Active debate on {lead_r['feed']} with {lead_r['comments']} comments and {lead_r['score']} upvotes."
-        elif headlines:
-            summary = f"{headlines[0]}. Developing story circulating across national public search and news reporting."
-        else:
-            summary = f"Civic conversation and search activity around {title.lower()}, under observation across regional streams."
-
-    # 2. Enriched Why Trending
-    why_trending = brief.get('why_trending', '') if brief else ''
-    if not why_trending:
-        if matched_reddit and (matched_reddit[0]['comments'] > 15 or matched_reddit[0]['score'] > 200):
-            lead_r = matched_reddit[0]
-            why_trending = f"High engagement discussion thread in {lead_r['feed']} (⬆️ {lead_r['score']:,} upvotes, 💬 {lead_r['comments']:,} comments)."
-        elif reasons:
-            why_trending = '; '.join(reasons)
-        elif scores.get('news_heat', 0) > 1.5:
-            pub_cnt = t.get('publishers', len(matched_articles) or 2)
-            lang_cnt = len(languages_raw) or 1
-            why_trending = f"Multi-source news surge across {pub_cnt} publishers in {lang_cnt} regional language{'s' if lang_cnt > 1 else ''}."
-        elif scores.get('search_heat', 0) > 1.5:
-            ent_lead = entities[0] if entities else title
-            why_trending = f"High search volume velocity and rapid public query surge around {ent_lead}."
-        elif ig.get('on_topic_posts', 0) > 0:
-            why_trending = f"Social engagement acceleration across verified community posts and discussion threads."
-        else:
-            why_trending = f"Sustained civic interest monitored across real-time regional indicators."
+    summary, why_trending, matched_articles = _get_topic_summary_and_why(t)
 
     stance = brief.get('stance', {}) if brief else {}
 
@@ -1142,118 +1159,26 @@ _nt_values = json.dumps([v for _, v in all_narrative_counts.most_common(9)])
 _total_narrative = sum(all_narrative_counts.values()) or 1
 
 # Strategic Early Warnings: Rapid Issue Escalation & Intervention Radar
-# Synthesizes 6 concrete friction axes representing all 14 vulnerable issues detected across topics
-_threat_axes_defs = [
-    {
-        'id': 'voter_rolls',
-        'axis': 'Institutional Delegitimization & Electoral Integrity',
-        'priority': 'CRITICAL',
-        'badge_bg': '#fee2e2', 'badge_color': '#b91c1c', 'border': '#fca5a5',
-        'keywords': ['electoral roll', 'voter', 'vote theft', 'cec', 'gyanesh kumar', 'freedom park protest called against cec'],
-        'threat_mechanics': 'Multi-state narrative convergence alleging mass voter deletions via Form 7. Opposition parties are synchronizing digital campaigns and physical rallies targeting the Election Commission to sow systemic doubt ahead of assembly elections.',
-        'demographic_trait': '18-35 Cohort · High Impatience (71%) · Cynical / Hostile Mindset',
-        'risk_diagnosis': 'Opposition leaders and digital influencers are weaponizing administrative voter list updates into a coordinated "stolen democracy" narrative. Opposition sentiment holds ~75% engagement dominance, creating fertile ground for nationwide election delegitimization.',
-        'immediate_actions': [
-            'ECI Technical Secretariat must issue a transparent data bulletin detailing Form 7 statutory deletion statistics and multi-party verification audits.',
-            'State BJP units should equip local booth agents with verified voter roll verification toolkits to counter localized false claims immediately.',
-            'Digital media rapid-response desk should push factual explainer reels clarifying statutory deletion rules for deceased/relocated voters.'
-        ]
-    },
-    {
-        'id': 'detention_optics',
-        'axis': 'Opposition Martyrdom & Law Enforcement Optics',
-        'priority': 'HIGH',
-        'badge_bg': '#ffedd5', 'badge_color': '#c2410c', 'border': '#fed7aa',
-        'keywords': ['detained', 'jantar mantar', 'confrontation with congress', 'police confrontation'],
-        'threat_mechanics': 'High-velocity visuals of senior MPs being physically bundled into police buses generate emotional rallying points that consolidate otherwise fragmented opposition factions and trigger cynical detachment among middle-class observers.',
-        'demographic_trait': 'Middle-Class & Urban Youth · High Polarization · Critical Sentiment (68%)',
-        'risk_diagnosis': 'Heavy-handed detention visuals at Jantar Mantar furnish the opposition with viral "police-state" imagery. This unifies disparate regional opposition parties and overshadows government policy messaging.',
-        'immediate_actions': [
-            'Direct law enforcement to calibrate public dispersal protocols and avoid aggressive physical detainment imagery that creates opposition martyr optics.',
-            'Delhi Police and administration should proactively issue official video releases establishing prior warning notices and designated protest zoning violations.',
-            'Depute senior parliamentary spokespersons for prime-time debates to pivot discussion toward unlawful traffic blockades and public inconvenience.'
-        ]
-    },
-    {
-        'id': 'women_safety',
-        'axis': 'Grassroots Women Safety & Governance Failure Framing',
-        'priority': 'HIGH',
-        'badge_bg': '#ffedd5', 'badge_color': '#c2410c', 'border': '#fed7aa',
-        'keywords': ['chappal', 'women safety'],
-        'threat_mechanics': 'Visceral symbolic protests (e.g., chappal protests at Freedom Park) weaponize municipal and public safety failures against governance credentials. This directly threatens the crucial women voter coalition that forms a core pillar of ruling party support.',
-        'demographic_trait': 'Female Demographic & Urban Families · High Fear / Frustration · High Viral Potential',
-        'risk_diagnosis': 'High-impact symbolic demonstrations (chappals) convert safety grievances into viral anti-incumbent symbols. Left unaddressed, this erodes the decisive female electorate trust in governance and law enforcement.',
-        'immediate_actions': [
-            'Fast-track public announcements of urban surveillance expansion, pink patrol deployments, and dedicated women emergency response desks.',
-            'Party women wing (Mahila Morcha) must hold town halls and community safety audits to preempt opposition political capture of women safety grievances.',
-            'Direct state home departments to issue 48-hour compliance directives on high-risk crime hotspots and pending POCSO/safety trials.'
-        ]
-    },
-    {
-        'id': 'youth_agitation',
-        'axis': 'Youth Disaffection & Cross-Campus Agitation',
-        'priority': 'HIGH',
-        'badge_bg': '#ffedd5', 'badge_color': '#c2410c', 'border': '#fed7aa',
-        'keywords': ['student', 'vande mataram seminar', 'tribal student', 'delhi university'],
-        'threat_mechanics': 'Multiple localized campus flashpoints across Kerala, Mumbai, and Delhi are showing signs of cross-university coordination. Models detect peak impatience and institutional anger in the 18-24 cohort, creating ripe conditions for a unified student movement.',
-        'demographic_trait': '18-24 Gen Z Cohort · Peak Impatience (82%) · Anti-Establishment Sentiment',
-        'risk_diagnosis': 'Disparate campus grievances (ideological disputes in Kerala, tribal student welfare in Mumbai, exam fee/hostel friction in Delhi) threaten to coalesce into an all-India student agitation if framed under an anti-youth narrative.',
-        'immediate_actions': [
-            'Ministry of Education and university administrations must open preemptive grievance dialogs with recognized student councils before agitation dates.',
-            'Instruct university chancellors to de-escalate ideological seminar controversies through open academic symposiums.',
-            'Highlight government youth welfare initiatives, scholarship disbursals, and newly announced civil service exam calendar transparencies.'
-        ]
-    },
-    {
-        'id': 'identity_flareup',
-        'axis': 'Regional & Identity Friction Flashpoint',
-        'priority': 'MEDIUM',
-        'badge_bg': '#fef3c7', 'badge_color': '#b45309', 'border': '#fde68a',
-        'keywords': ['kashmiri youth', 'connaught place'],
-        'threat_mechanics': 'Isolated urban altercation in high-visibility central Delhi is being framed along regional and ethnic fault lines, risking backlash in sensitive border states and international negative press.',
-        'demographic_trait': 'Regional Diaspora & Youth · Heightened Identity Sensitivity · 74% Critical',
-        'risk_diagnosis': 'A localized street fight in CP is being weaponized into an ethnic profiling narrative. Narrative capture is heavily skewed towards opposition amplifiers attempting to ignite regional resentment in J&K.',
-        'immediate_actions': [
-            'Delhi Police must publicly announce prompt FIR registration and suspect custody with CCTV evidence within hours to prevent misinformation.',
-            'Home Ministry media cell should release reassuring statements affirming zero tolerance for harassment against students and youth from Jammu & Kashmir.'
-        ]
-    },
-    {
-        'id': 'infrastructure_blame',
-        'axis': 'Urban Decay & Civic Infrastructure Accountability',
-        'priority': 'WATCH',
-        'badge_bg': '#eff6ff', 'badge_color': '#1d4ed8', 'border': '#bfdbfe',
-        'keywords': ['building collapse', 'seemapuri'],
-        'threat_mechanics': 'Localized structural failures in densely populated urban clusters are being generalized into systemic attacks on municipal corruption and regulatory dereliction, dampening national infrastructure achievements.',
-        'demographic_trait': 'Lower-Middle-Class Urban Residents · Impatience · Municipal Frustration',
-        'risk_diagnosis': 'Structural building collapse incidents in northeast Delhi provide opposition spokespersons with visual proof to counter central infrastructure claims with localized civic negligence charges.',
-        'immediate_actions': [
-            'Announce rapid structural safety audit drives across unauthorized/dense constructions and ensure prompt interim relief for affected families.',
-            'Deploy local municipal spokespersons to delineate administrative jurisdictions and counter attempts to link local building violations to central development policies.'
-        ]
-    }
-]
-
-_early_warning_alerts = []
-# Dynamic Neural Early-Warning Radar using fine-tuned MultiTaskStrategicClassifier (mDeBERTa-v3)
 from src.identify_what_matters.strategic_classifier import classify_strategic_batch
 
 _AXIS_TO_META = {
     'institutional_integrity': {
         'axis': 'Institutional Delegitimization & Electoral Integrity',
         'badge_bg': '#fee2e2', 'badge_color': '#b91c1c', 'border': '#fca5a5',
+        'keywords': ['electoral roll', 'voter', 'vote theft', 'cec', 'gyanesh kumar', 'freedom park protest called against cec'],
         'threat_mechanics': 'Multi-state narrative convergence targeting institutional credibility (e.g. Election Commission, Judiciary, central agencies). Coordinated campaigns seek to sow systemic doubt ahead of electoral milestones.',
         'demographic_trait': '18-35 Cohort · High Impatience · Skeptical Mindset',
         'risk_diagnosis': 'Institutional distrust narratives generate fertile ground for nationwide delegitimization and cross-party opposition alignment.',
         'immediate_actions': [
-            'Issue transparent data bulletins and proactive statutory clarification audits.',
-            'Deploy regional spokespersons with verified documentation toolkits to counter localized claims.',
-            'Digital rapid-response desk should push factual visual explainers across social platforms.'
+            'ECI Technical Secretariat must issue a transparent data bulletin detailing Form 7 statutory deletion statistics and multi-party verification audits.',
+            'State BJP units should equip local booth agents with verified voter roll verification toolkits to counter localized false claims immediately.',
+            'Digital media rapid-response desk should push factual visual explainers across social platforms.'
         ]
     },
     'public_safety_crisis': {
         'axis': 'Grassroots Public Safety & Governance Vulnerability',
         'badge_bg': '#ffedd5', 'badge_color': '#c2410c', 'border': '#fed7aa',
+        'keywords': ['chappal', 'women safety'],
         'threat_mechanics': 'Visceral symbolic protests weaponize municipal and public safety incidents against governance credentials, directly impacting voter trust and security sentiment.',
         'demographic_trait': 'Female Demographic & Urban Families · High Fear / Frustration · High Viral Potential',
         'risk_diagnosis': 'High-impact symbolic safety grievances convert localized crime into viral anti-incumbent symbols if unaddressed.',
@@ -1266,6 +1191,7 @@ _AXIS_TO_META = {
     'youth_campus_agitation': {
         'axis': 'Youth Disaffection & Cross-Campus Agitation',
         'badge_bg': '#ffedd5', 'badge_color': '#c2410c', 'border': '#fed7aa',
+        'keywords': ['student', 'vande mataram seminar', 'tribal student', 'delhi university', 'detained', 'jantar mantar'],
         'threat_mechanics': 'Localized campus flashpoints, exam controversies, or student welfare disputes showing signs of cross-university digital coordination.',
         'demographic_trait': '18-24 Gen Z Cohort · Peak Impatience · Anti-Establishment Sentiment',
         'risk_diagnosis': 'Disparate campus grievances threaten to coalesce into an all-India student agitation if framed under an anti-youth narrative.',
@@ -1278,6 +1204,7 @@ _AXIS_TO_META = {
     'communal_regional_faultline': {
         'axis': 'Regional & Identity Friction Flashpoint',
         'badge_bg': '#fef3c7', 'badge_color': '#b45309', 'border': '#fde68a',
+        'keywords': ['kashmiri youth', 'connaught place'],
         'threat_mechanics': 'Localized altercations or linguistic/regional disputes weaponized along ethnic or state fault lines, risking backlash across border regions.',
         'demographic_trait': 'Regional Diaspora & Youth · Heightened Identity Sensitivity · Elevated Critical Sentiment',
         'risk_diagnosis': 'Weaponized identity framing seeks to ignite regional resentment and international adverse commentary.',
@@ -1289,6 +1216,7 @@ _AXIS_TO_META = {
     'infrastructure_governance_failure': {
         'axis': 'Urban Decay & Civic Infrastructure Accountability',
         'badge_bg': '#eff6ff', 'badge_color': '#1d4ed8', 'border': '#bfdbfe',
+        'keywords': ['building collapse', 'seemapuri'],
         'threat_mechanics': 'Localized structural failures or civic breakdowns generalized into systemic attacks on municipal corruption and regulatory dereliction.',
         'demographic_trait': 'Lower-Middle-Class Urban Residents · Impatience · Municipal Frustration',
         'risk_diagnosis': 'Structural civic incidents furnish visual proof to counter development claims with localized negligence charges.',
@@ -1300,6 +1228,7 @@ _AXIS_TO_META = {
     'economic_distress': {
         'axis': 'Middle-Class Economic Strain & Inflation Anxiety',
         'badge_bg': '#fee2e2', 'badge_color': '#b91c1c', 'border': '#fca5a5',
+        'keywords': ['inflation', 'petrol price', 'price hike', 'unemployment'],
         'threat_mechanics': 'Spikes in everyday living costs, fuel/grocery prices, loan interest rates, or corporate layoffs driving widespread middle-class anxiety.',
         'demographic_trait': '25-54 Working Professionals · High Anxiety · Economic Focus',
         'risk_diagnosis': 'Pocketbook pressures erode middle-class economic optimism and amplify anti-incumbency sentiment.',
@@ -1311,6 +1240,7 @@ _AXIS_TO_META = {
     'disinformation_rumor_panic': {
         'axis': 'Viral Disinformation & Panic Amplification',
         'badge_bg': '#fee2e2', 'badge_color': '#b91c1c', 'border': '#fca5a5',
+        'keywords': ['rumor', 'fake video', 'deepfake', 'misinformation'],
         'threat_mechanics': 'Rapid viral dissemination of unverified claims or manipulated media creating public panic or institutional delegitimization.',
         'demographic_trait': 'Cross-Demographic · High Emotional Velocity · Low Deliberation',
         'risk_diagnosis': 'Fabricated claims weaponize panic to trigger spontaneous civic confrontation before fact-checks gain traction.',
@@ -1321,6 +1251,8 @@ _AXIS_TO_META = {
     }
 }
 
+_early_warning_alerts = []
+
 # Group topics by neural threat axis
 _axis_grouped_topics = {}
 for t in topics_client:
@@ -1329,25 +1261,14 @@ for t in topics_client:
     if ax_id and ax_id != 'general_civic_deliberation' and ax_id in _AXIS_TO_META:
         _axis_grouped_topics.setdefault(ax_id, []).append(t)
 
-# Fallback check against manual keywords if neural missed any explicit alert
-for ax_def in _threat_axes_defs:
-    matched = []
-    for t in topics_client:
-        t_low = (t.get('title', '') + ' ' + t.get('summary', '')).lower()
-        if any(k in t_low for k in ax_def.get('keywords', [])):
-            matched.append(t)
-    if matched:
-        mapped_axis_id = {
-            'voter_rolls': 'institutional_integrity',
-            'detention_optics': 'youth_campus_agitation',
-            'women_safety': 'public_safety_crisis',
-            'youth_agitation': 'youth_campus_agitation',
-            'identity_flareup': 'communal_regional_faultline',
-            'infrastructure_blame': 'infrastructure_governance_failure'
-        }.get(ax_def.get('id'), 'institutional_integrity')
-        for m_t in matched:
-            if m_t not in _axis_grouped_topics.setdefault(mapped_axis_id, []):
-                _axis_grouped_topics[mapped_axis_id].append(m_t)
+# Fallback check against keywords if neural missed any explicit alert
+for ax_id, meta in _AXIS_TO_META.items():
+    if meta.get('keywords'):
+        for t in topics_client:
+            t_low = (t.get('title', '') + ' ' + t.get('summary', '')).lower()
+            if any(k in t_low for k in meta['keywords']):
+                if t not in _axis_grouped_topics.setdefault(ax_id, []):
+                    _axis_grouped_topics[ax_id].append(t)
 
 for ax_id, matched_topics in _axis_grouped_topics.items():
     meta = _AXIS_TO_META[ax_id]
@@ -1373,6 +1294,19 @@ for ax_id, matched_topics in _axis_grouped_topics.items():
     b_bg = "#fee2e2" if priority == "CRITICAL" else "#ffedd5" if priority == "HIGH" else "#fef3c7"
     b_col = "#b91c1c" if priority == "CRITICAL" else "#c2410c" if priority == "HIGH" else "#b45309"
     b_border = "#fca5a5" if priority == "CRITICAL" else "#fed7aa" if priority == "HIGH" else "#fde68a"
+
+    matched_threat = {
+        'axis': meta['axis'],
+        'priority': priority,
+        'badge_bg': b_bg,
+        'badge_color': b_col,
+        'border': b_border,
+        'risk_diagnosis': meta['risk_diagnosis'],
+        'immediate_actions': meta['immediate_actions']
+    }
+    for t in matched_topics:
+        if 'matched_threat' not in t:
+            t['matched_threat'] = matched_threat
 
     _early_warning_alerts.append({
         'priority': priority,
@@ -3663,92 +3597,25 @@ html_content = f"""<!DOCTYPE html>
           <div class="topic-detail-drawer">
             <!-- Strategic Risk Diagnosis & Recommended Government Action Playbook (If Vulnerability Detected) -->
             ${{(() => {{
-              const text = ((t.title || '') + ' ' + (t.summary || '')).toLowerCase();
-              let matchedThreat = null;
-              if (text.includes('electoral roll') || text.includes('voter') || text.includes('vote theft') || text.includes('cec') || text.includes('gyanesh kumar')) {{
-                matchedThreat = {{
-                  axis: 'Institutional Delegitimization & Electoral Integrity',
-                  priority: 'CRITICAL', badge_bg: '#fee2e2', badge_color: '#b91c1c', border: '#fca5a5',
-                  diagnosis: 'Opposition leaders and digital influencers are weaponizing administrative voter list updates (Form 7) into a coordinated "stolen democracy" narrative. Attacks directly target ECI credibility ahead of assembly elections.',
-                  actions: [
-                    'ECI Technical Secretariat must issue a transparent data bulletin detailing Form 7 statutory deletion statistics and multi-party verification audits.',
-                    'State BJP units should equip local booth agents with verified voter roll verification toolkits to counter localized false claims immediately.',
-                    'Digital media rapid-response desk should push factual explainer reels clarifying statutory deletion rules for deceased/relocated voters.'
-                  ]
-                }};
-              }} else if (text.includes('detained') || text.includes('jantar mantar') || text.includes('confrontation with congress') || text.includes('police confrontation')) {{
-                matchedThreat = {{
-                  axis: 'Opposition Martyrdom & Law Enforcement Optics',
-                  priority: 'HIGH', badge_bg: '#ffedd5', badge_color: '#c2410c', border: '#fed7aa',
-                  diagnosis: 'Visuals of senior MPs being physically bundled into police vehicles generate emotional rallying points that consolidate otherwise fragmented opposition factions and trigger cynical detachment among middle-class observers.',
-                  actions: [
-                    'Direct law enforcement to calibrate public dispersal protocols and avoid aggressive physical detainment imagery that creates opposition martyr optics.',
-                    'Delhi Police and administration should proactively issue official video releases establishing prior warning notices and designated protest zoning violations.',
-                    'Depute senior parliamentary spokespersons for prime-time debates to pivot discussion toward unlawful traffic blockades and public inconvenience.'
-                  ]
-                }};
-              }} else if (text.includes('chappal') || text.includes('women safety')) {{
-                matchedThreat = {{
-                  axis: 'Grassroots Women Safety & Governance Failure Framing',
-                  priority: 'HIGH', badge_bg: '#ffedd5', badge_color: '#c2410c', border: '#fed7aa',
-                  diagnosis: 'Visceral symbolic demonstrations (chappals) convert safety grievances into viral anti-incumbent symbols. Left unaddressed, this erodes the decisive female electorate trust in governance and law enforcement.',
-                  actions: [
-                    'Fast-track public announcements of urban surveillance expansion, pink patrol deployments, and dedicated women emergency response desks.',
-                    'Party women wing (Mahila Morcha) must hold town halls and community safety audits to preempt opposition political capture of women safety grievances.',
-                    'Direct state home departments to issue 48-hour compliance directives on high-risk crime hotspots and pending POCSO/safety trials.'
-                  ]
-                }};
-              }} else if (text.includes('student') || text.includes('vande mataram') || text.includes('tribal student') || text.includes('delhi university')) {{
-                matchedThreat = {{
-                  axis: 'Youth Disaffection & Cross-Campus Agitation',
-                  priority: 'HIGH', badge_bg: '#ffedd5', badge_color: '#c2410c', border: '#fed7aa',
-                  diagnosis: 'Disparate campus grievances (ideological disputes in Kerala, tribal student welfare in Mumbai, exam fee/hostel friction in Delhi) threaten to coalesce into an all-India student agitation if framed under an anti-youth narrative.',
-                  actions: [
-                    'Ministry of Education and university administrations must open preemptive grievance dialogs with recognized student councils before agitation dates.',
-                    'Instruct university chancellors to de-escalate ideological seminar controversies through open academic symposiums.',
-                    'Highlight government youth welfare initiatives, scholarship disbursals, and newly announced civil service exam calendar transparencies.'
-                  ]
-                }};
-              }} else if (text.includes('kashmiri youth') || text.includes('connaught place')) {{
-                matchedThreat = {{
-                  axis: 'Regional & Identity Friction Flashpoint',
-                  priority: 'MEDIUM', badge_bg: '#fef3c7', badge_color: '#b45309', border: '#fde68a',
-                  diagnosis: 'A localized street fight in CP is being weaponized into an ethnic profiling narrative. Narrative capture is heavily skewed towards opposition amplifiers attempting to ignite regional resentment in J&K.',
-                  actions: [
-                    'Delhi Police must publicly announce prompt FIR registration and suspect custody with CCTV evidence within hours to prevent misinformation.',
-                    'Home Ministry media cell should release reassuring statements affirming zero tolerance for harassment against students and youth from Jammu & Kashmir.'
-                  ]
-                }};
-              }} else if (text.includes('building collapse') || text.includes('seemapuri')) {{
-                matchedThreat = {{
-                  axis: 'Urban Decay & Civic Infrastructure Accountability',
-                  priority: 'WATCH', badge_bg: '#eff6ff', badge_color: '#1d4ed8', border: '#bfdbfe',
-                  diagnosis: 'Structural building collapse incidents in northeast Delhi provide opposition spokespersons with visual proof to counter central infrastructure claims with localized civic negligence charges.',
-                  actions: [
-                    'Announce rapid structural safety audit drives across unauthorized/dense constructions and ensure prompt interim relief for affected families.',
-                    'Deploy local municipal spokespersons to delineate administrative jurisdictions and counter attempts to link local building violations to central development policies.'
-                  ]
-                }};
-              }}
-
-              if (!matchedThreat) return '';
+              const mt = t.matched_threat;
+              if (!mt) return '';
               return `
-                <div style="margin-bottom: 14px; padding: 12px 16px; background: #ffffff; border: 1.5px solid ${{matchedThreat.border}}; border-left: 5px solid ${{matchedThreat.badge_color}}; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.03);">
+                <div style="margin-bottom: 14px; padding: 12px 16px; background: #ffffff; border: 1.5px solid ${{mt.border}}; border-left: 5px solid ${{mt.badge_color}}; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.03);">
                   <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 8px;">
                     <div style="display:flex; align-items:center; gap:8px;">
-                      <span class="chip mono" style="font-weight:800; font-size:10.5px; background:${{matchedThreat.badge_bg}}; color:${{matchedThreat.badge_color}}; border-color:${{matchedThreat.border}};">🚨 ${{matchedThreat.priority}} THREAT AXIS</span>
-                      <span style="font-weight:700; font-size:13px; color:#0f172a;">${{matchedThreat.axis}}</span>
+                      <span class="chip mono" style="font-weight:800; font-size:10.5px; background:${{mt.badge_bg}}; color:${{mt.badge_color}}; border-color:${{mt.border}};">🚨 ${{mt.priority}} THREAT AXIS</span>
+                      <span style="font-weight:700; font-size:13px; color:#0f172a;">${{escapeHtml(mt.axis)}}</span>
                     </div>
                     <span class="chip mono" style="font-size:10px; background:#f8fafc; color:#64748b;">AI Strategic Advisory</span>
                   </div>
                   <div style="font-size:12px; color:#334155; line-height:1.5; margin-bottom:10px; background:#f8fafc; padding:8px 10px; border-radius:4px; border:1px solid #e2e8f0;">
-                    <b>Risk Diagnosis:</b> ${{matchedThreat.diagnosis}}
+                    <b>Risk Diagnosis:</b> ${{escapeHtml(mt.risk_diagnosis)}}
                   </div>
-                  <div style="font-size:11.5px; font-weight:700; color:${{matchedThreat.badge_color}}; margin-bottom:5px; text-transform:uppercase; letter-spacing:0.3px;">
+                  <div style="font-size:11.5px; font-weight:700; color:${{mt.badge_color}}; margin-bottom:5px; text-transform:uppercase; letter-spacing:0.3px;">
                     🎯 Recommended Strategic Action Playbook:
                   </div>
                   <ol style="margin:0; padding-left:18px; font-size:12px; color:#1e293b; line-height:1.5;">
-                    ${{matchedThreat.actions.map(a => `<li style="margin-bottom:3px;">${{escapeHtml(a)}}</li>`).join('')}}
+                    ${{(mt.immediate_actions || []).map(a => `<li style="margin-bottom:3px;">${{escapeHtml(a)}}</li>`).join('')}}
                   </ol>
                 </div>
               `;

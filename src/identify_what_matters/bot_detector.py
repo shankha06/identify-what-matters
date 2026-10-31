@@ -109,6 +109,13 @@ ANTI_INCUMBENT_PATTERNS = [
     re.compile(r"(?:मोदी चोर|ईवीएम चोरी|बीजेपी हटाओ|तानाशाही|संविधान बचाओ|राहुल गांधी जिंदाबाद|इस्तीफा दो)", re.I),
 ]
 
+GENERIC_SLOGAN_PATTERNS = [
+    re.compile(r"\b(?:boycott\w*|shame on|resign now|toolkit|godi media|pappu|bhakts?|librandus?)\b", re.I),
+    re.compile(r"\b(?:100% true|plz share|must watch|viral karo|trend karao|retweet|repost)\b", re.I),
+    re.compile(r"(?:शेयर करो|वायरल करो|ट्रेंड कराओ|सब देखें|जरूर देखें)", re.I),
+    re.compile(r"\b(?:share karo|viral karo|trend karo|sabko batao|must share|must watch|dekho aur share)\b", re.I),
+]
+
 
 def classify_template_lean(text: str) -> dict:
     """Determine the dominant political lean and sentiment of a repeated template cluster."""
@@ -214,20 +221,7 @@ def _evaluate_comment_stance_and_lean(text: str) -> dict:
 class BotAstroturfDetector:
     """Multi-signal statistical & lexical bot / astroturf classifier."""
 
-    BOT_PHRASE_PATTERNS = [
-        # English political slogans
-        re.compile(r"\b(?:vote for bjp|vote for modi|aayega to modi|ayega to modi|modi sarkar|har har modi|jai shri ram|hindu rashtra)\b", re.I),
-        re.compile(r"\b(?:modi chor|evm chor|evm scam|bjp hatao|dictatorship|tanashahi|save constitution|rahul gandhi zindabad|modi resign)\b", re.I),
-        re.compile(r"\b(?:boycott\w*|shame on|resign now|toolkit|godi media|pappu|bhakts?|librandus?)\b", re.I),
-        re.compile(r"\b(?:100% true|plz share|must watch|viral karo|trend karao|retweet|repost)\b", re.I),
-        # Hindi/Devanagari slogans (script-level matching)
-        re.compile(r"(?:मोदी जी जिंदाबाद|मोदी है तो मुमकिन है|जय श्री राम|भारत माता की जय|हिंदू राष्ट्र|वंदे मातरम्)", re.I),
-        re.compile(r"(?:मोदी चोर|ईवीएम चोरी|बीजेपी हटाओ|तानाशाही|संविधान बचाओ|राहुल गांधी जिंदाबाद)", re.I),
-        re.compile(r"(?:शेयर करो|वायरल करो|ट्रेंड कराओ|सब देखें|जरूर देखें)", re.I),
-        # Hinglish coordination signals
-        re.compile(r"\b(?:jai shree ram|jai sri ram|bharat mata ki jai|vande mataram|modi hai to mumkin hai)\b", re.I),
-        re.compile(r"\b(?:share karo|viral karo|trend karo|sabko batao|must share|must watch|dekho aur share)\b", re.I),
-    ]
+    BOT_PHRASE_PATTERNS = PRO_INCUMBENT_PATTERNS + ANTI_INCUMBENT_PATTERNS + GENERIC_SLOGAN_PATTERNS
 
     def evaluate_account_risk(self, comment: dict, is_in_repetition_cluster: bool = False) -> dict:
         """Score an individual comment / account for bot likelihood (0.0 to 1.0)."""

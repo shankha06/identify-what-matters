@@ -360,10 +360,15 @@ def _keyword_fallback(task: str, text: str, pulse: dict) -> dict[str, Any]:
     raise ValueError(f"unknown task: {task}")
 
 
+_CLASSIFY_MEMO_CACHE: dict[str, dict[str, dict[str, Any]]] = {}
+
+
 def classify(text: str) -> dict[str, dict[str, Any]]:
     """Classifies one post/comment across every pipeline task. Never raises on bad/short text -
     returns low-confidence fallbacks instead, since this runs over thousands of real comments."""
     text = text or ""
+    if text in _CLASSIFY_MEMO_CACHE:
+        return _CLASSIFY_MEMO_CACHE[text]
     try:
         pulse = political_pulse_engine.classify_text_favorability(text)
     except Exception:
@@ -371,4 +376,5 @@ def classify(text: str) -> dict[str, dict[str, Any]]:
     result = {}
     for task in TASKS:
         result[task] = _model_predict(task, text) or _keyword_fallback(task, text, pulse)
+    _CLASSIFY_MEMO_CACHE[text] = result
     return result

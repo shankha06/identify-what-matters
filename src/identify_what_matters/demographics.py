@@ -104,8 +104,6 @@ def _neural_demo_probs(text: str):
     """(mental, age) softmax vectors for one text, served from the batch cache."""
     if not text.strip():
         return None
-    if text not in _NEURAL_DEMO_CACHE:
-        prewarm_neural_demographics([text])
     return _NEURAL_DEMO_CACHE.get(text)
 
 
@@ -181,11 +179,6 @@ def predict_party_neural(text: str) -> tuple[str, float] | None:
     """Predict political party leaning using fine-tuned neural transformer (served from the batch cache)."""
     if not text.strip():
         return None
-    if text not in _NEURAL_PARTY_CACHE:
-        try:
-            prewarm_party_neural([text])
-        except Exception:
-            return None
     return _NEURAL_PARTY_CACHE.get(text)
 
 def _get_models():
