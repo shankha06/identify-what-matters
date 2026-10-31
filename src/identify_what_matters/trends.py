@@ -913,7 +913,7 @@ class History:
         with self.db:
             for account, items in feeds.items():
                 usable = [m for m in items if m.get("taken_at") and not (m.get("pinned") or m.get("paid") or m.get("counts_hidden"))
-                          and m.get("like_count") is not None and m.get("comment_verified")]
+                          and m.get("like_count") is not None and m.get("comment_verified", True)]
                 settled = [m for m in usable if (hours_since(m["taken_at"], reference) or 0) >= 6] or usable
                 if len(settled) < 3:
                     continue

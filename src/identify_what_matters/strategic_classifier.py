@@ -117,7 +117,14 @@ def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
     if not model_dir.exists() or not (model_dir / "strategic_heads.pt").exists():
         return None, None, None
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        try:
+            free_mem = torch.cuda.mem_get_info()[0]
+            if free_mem >= 2 * 1024 * 1024 * 1024:
+                device = torch.device("cuda")
+        except Exception:
+            pass
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -134,7 +141,11 @@ def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
             model.auth_classifier.load_state_dict(heads_state["auth_classifier"])
             model.stage_classifier.load_state_dict(heads_state["stage_classifier"])
 
-        model.to(device)
+        try:
+            model.to(device)
+        except Exception:
+            device = torch.device("cpu")
+            model.to(device)
         model.eval()
 
         _MODEL_CACHE["model"] = model
@@ -143,6 +154,9 @@ def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
         return model, tokenizer, device
     except Exception as e:
         print(f"Warning: Failed to load Strategic Neural Classifier from {model_dir}: {e}")
+        _MODEL_CACHE["model"] = None
+        _MODEL_CACHE["tokenizer"] = None
+        _MODEL_CACHE["device"] = None
         return None, None, None
 
 def classify_strategic(text: str, max_length: int = 128) -> Dict[str, Any]:

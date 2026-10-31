@@ -234,15 +234,18 @@ def score_topic(
     # Blend momentum, debate intensity, framing gap, and neural criticality probability
     topic_summary_text = " ".join(filter(None, [topic.get("title"), (brief or {}).get("summary")]))
     neural_crit_boost = 0.5
-    neural_strategic_meta = None
-    try:
-        from identify_what_matters.strategic_classifier import classify_strategic
-        s_intel = classify_strategic(topic_summary_text)
-        if s_intel:
-            neural_crit_boost = s_intel.get("criticality_score", 0.5)
-            neural_strategic_meta = s_intel
-    except Exception:
-        pass
+    neural_strategic_meta = topic.get("neural_strategic")
+    if neural_strategic_meta:
+        neural_crit_boost = neural_strategic_meta.get("criticality_score", 0.5)
+    elif is_political:
+        try:
+            from identify_what_matters.strategic_classifier import classify_strategic
+            s_intel = classify_strategic(topic_summary_text)
+            if s_intel:
+                neural_crit_boost = s_intel.get("criticality_score", 0.5)
+                neural_strategic_meta = s_intel
+        except Exception:
+            pass
 
     if is_political:
         undercurrent_score = round((

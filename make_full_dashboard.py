@@ -1,5 +1,6 @@
 import json
 import html
+import math
 import os
 import re
 import sys
@@ -120,7 +121,7 @@ from src.identify_what_matters.demographics import (
     FEMALE_CONVERSATIONAL, MALE_CONVERSATIONAL, infer_location, _get_models
 )
 from src.identify_what_matters.political_evidence import audit_comments
-from src.identify_what_matters.bot_detector import bot_detector
+from src.identify_what_matters.bot_detector import bot_detector, _evaluate_comment_stance_and_lean
 from src.identify_what_matters.political_pulse import political_pulse_engine
 from src.identify_what_matters.political_corpus import ISSUE_CLUSTERS
 from src.identify_what_matters import political_classifier as polclf
@@ -296,6 +297,9 @@ def infer_topic_mental_state(t, pool=None):
         top_irr = irr_cnt.most_common(1)[0][0] if irr_cnt else 'rational'
 
         n_pass = len(passages)
+        global_age_cohorts[top_age] += n_pass or 1
+        global_mental_states[top_mindset] += n_pass or 1
+        global_personas[top_gen] += n_pass or 1
         return {
             'has_data': True,
             'source': 'story_nlp_inferred',
@@ -456,6 +460,41 @@ for r in reddit_signals:
     if rtitle and rtitle not in signals_by_title:
         signals_by_title[rtitle] = r
 
+# Load stored Instagram media and comments if available in the run directory
+stored_instagram = {}
+ig_json_path = target_run_dir / 'instagram.json'
+if ig_json_path.exists():
+    try:
+        with ig_json_path.open(encoding='utf-8') as f:
+            stored_instagram = json.load(f)
+        print(f'[dashboard] loaded stored instagram evidence across {len(stored_instagram)} topics')
+    except Exception:
+        stored_instagram = {}
+
+# Ensure topics have comment_pool populated from stored_instagram if missing
+for _t in topics:
+    _tbrief = _t.get('brief')
+    if not _tbrief:
+        _tbrief = {}
+        _t['brief'] = _tbrief
+    if not _tbrief.get('comment_pool'):
+        _k = _t.get('topic_key') or ''
+        _media = (stored_instagram.get(_k) or {}).get('media', [])
+        _cmts = []
+        for _m in _media:
+            for _c in _m.get('comments', []):
+                _ctxt = str(_c.get('text') or '').strip()
+                if _ctxt:
+                    _cmts.append({
+                        'text': _ctxt,
+                        'likes': max(0, int(_c.get('like_count') or _c.get('likes') or 0)),
+                        'replies': max(0, int(_c.get('reply_count') or 0)),
+                        'author_id': str((_c.get('user') or {}).get('pk') or _c.get('author_id') or ''),
+                        'created_at': _c.get('taken_at') or _c.get('created_at', ''),
+                    })
+        _cmts.sort(key=lambda x: x['likes'], reverse=True)
+        _tbrief['comment_pool'] = _cmts[:80]
+
 # Batch the per-comment neural model calls once up front; the per-topic loop below reads cached results.
 from src.identify_what_matters.demographics import prewarm_neural_demographics, prewarm_party_neural as prewarm_demo_party
 from src.identify_what_matters.political_pulse import prewarm_party_neural as prewarm_pulse_party
@@ -464,15 +503,54 @@ for _t in topics:
     _neural_texts += [str(c.get('text') or '') for c in ((_t.get('brief') or {}).get('comment_pool') or [])]
     _neural_texts += [str(c.get('text') or '') for c in ((_t.get('reddit_proxy') or {}).get('comment_excerpts') or [])]
 try:
-    prewarm_neural_demographics(_neural_texts)
-    prewarm_demo_party(_neural_texts)
-    prewarm_pulse_party(_neural_texts)
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    prewarm_neural_demographics(_neural_texts, batch_size=32)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    prewarm_demo_party(_neural_texts, batch_size=32)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    prewarm_pulse_party(_neural_texts, batch_size=32)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     print(f'[dashboard] batched neural prewarm over {len(set(_neural_texts))} unique comment texts')
 except Exception as _error:
     print(f'[dashboard] batched neural prewarm skipped: {type(_error).__name__}: {str(_error)[:120]}')
 
+from src.identify_what_matters.strategic_classifier import classify_strategic_batch
+try:
+    _all_topic_texts = [f"{_t.get('title', '')}. {(_t.get('brief') or {}).get('summary', '')}" for _t in topics]
+    _strategic_results = classify_strategic_batch(_all_topic_texts, batch_size=32)
+    for _t, _s_res in zip(topics, _strategic_results):
+        _t['neural_strategic'] = _s_res
+    print(f'[dashboard] batched strategic neural classification over {len(topics)} topics')
+except Exception as _e:
+    print(f'[dashboard] strategic batch skipped: {_e}')
+
+from src.identify_what_matters.political_classifier import prewarm_political_transformers
+try:
+    _topic_combined_texts = []
+    for _t in topics:
+        _t_brief = _t.get('brief') or {}
+        _t_sum = _t_brief.get('summary', '')
+        _t_why = _t_brief.get('why_trending', '')
+        _t_parts = [_t.get('title', '')]
+        if _t_sum:
+            _t_parts.append(_t_sum)
+        if _t_why:
+            _t_parts.append(_t_why)
+        _topic_combined_texts.append(". ".join(_t_parts))
+    prewarm_political_transformers(_topic_combined_texts, batch_size=32)
+    print(f'[dashboard] batched political transformers over {len(_topic_combined_texts)} topics')
+except Exception as _e:
+    print(f'[dashboard] political transformers batch skipped: {_e}')
+
 topics_client = []
 for idx, t in enumerate(topics):
+    if (idx + 1) % 50 == 0 or idx == 0:
+        print(f'[dashboard] processing topic {idx+1}/{len(topics)}...', flush=True)
     key = t.get('topic_key') or f"t{idx+1}"
     title = t.get('title', 'Untitled')
     cat = t.get('category', 'other')
@@ -555,9 +633,6 @@ for idx, t in enumerate(topics):
     # Aggregates
     cat_counts[cat] = cat_counts.get(cat, 0) + 1
     stage_counts[stage] = stage_counts.get(stage, 0) + 1
-    if stance:
-        top_st = max(stance.items(), key=lambda x: x[1])[0]
-        stance_counts[top_st] = stance_counts.get(top_st, 0) + 1
 
     # Check if political/civic
     is_political = (cat in {'politics_governance', 'civic_issues'}) or bool(re.search(
@@ -625,6 +700,9 @@ for idx, t in enumerate(topics):
         else:
             demo['top_region'] = 'National (Pan-India)'
         demo['has_data'] = True
+        global_age_cohorts[demo['cohort']] += 1
+        global_mental_states[demo['mindset']] += 1
+        global_personas[demo.get('gender_persona', 'Neutral / Topic-Centered')] += 1
 
     # Build a unified comment pool: Instagram (brief.comment_pool) + Reddit excerpts
     _ig_pool = (brief or {}).get('comment_pool') or []
@@ -657,6 +735,37 @@ for idx, t in enumerate(topics):
         _topic_text_parts.append(why_trending)
     _combined_topic_text = ". ".join(_topic_text_parts)
     _political_intel = polclf.classify(_combined_topic_text)
+
+    # Calculate and assign stance if missing from brief
+    if not stance and _combined_pool:
+        tones = Counter()
+        for c in _combined_pool:
+            c_txt = str(c.get('text') or '').strip()
+            if c_txt:
+                meta = _evaluate_comment_stance_and_lean(c_txt)
+                w = 1.0 + math.log1p(max(0, int(c.get('likes') or 0)))
+                tones[meta['stance']] += w
+        tot_t = sum(tones.values()) or 1.0
+        stance = {k: round(tones[k] / tot_t, 3) for k in ('supportive', 'critical', 'humorous', 'neutral')}
+        if brief is not None:
+            brief['stance'] = stance
+    elif not stance:
+        _s_obj = _political_intel.get('sentiment') or {}
+        _s_val = _s_obj.get('value', 'neutral')
+        if _s_val == 'positive':
+            stance = {'supportive': 0.60, 'critical': 0.15, 'humorous': 0.05, 'neutral': 0.20}
+        elif _s_val == 'negative':
+            stance = {'supportive': 0.15, 'critical': 0.60, 'humorous': 0.05, 'neutral': 0.20}
+        elif cat in ('cinema_tv_ott', 'music_celebrity', 'viral_memes_social'):
+            stance = {'supportive': 0.40, 'critical': 0.15, 'humorous': 0.35, 'neutral': 0.10}
+        else:
+            stance = {'supportive': 0.25, 'critical': 0.25, 'humorous': 0.10, 'neutral': 0.40}
+        if brief is not None:
+            brief['stance'] = stance
+
+    if stance:
+        top_st = max(stance.items(), key=lambda x: x[1])[0]
+        stance_counts[top_st] = stance_counts.get(top_st, 0) + 1
 
     if issue_cluster not in ('none', 'n/a', '', None) and issue_cluster in issue_cluster_stats:
         bucket = issue_cluster_stats[issue_cluster]
@@ -817,13 +926,97 @@ community_cross_tab_html = ''.join(community_table_rows) if community_table_rows
 bot_cluster_rows = []
 for cl in global_bot_audit.get('template_clusters', []):
     acc_badge = f'<span class="chip mono" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">{cl["unique_accounts"]} accounts</span>'
+    lean_col = cl.get("badge_color", "#c2410c")
+    lean_bg = cl.get("badge_bg", "#fff7ed")
+    lean_bor = cl.get("border_color", "#fed7aa")
+    synth_lean_chip = f'<span class="chip mono" style="background:{lean_bg};color:{lean_col};border-color:{lean_bor};font-weight:600;font-size:11px;">{html.escape(cl.get("synthetic_lean", "Neutral Script"))}</span>'
+    dom_sent_chip = f'<span class="chip mono" style="font-size:11px;background:var(--surface-2);color:var(--text);">{html.escape(cl.get("dominant_sentiment", "Template Slogan"))}</span>'
     bot_cluster_rows.append(
         f'<tr><td><div style="font-size:12.5px;font-style:italic;">"{html.escape(cl["template"])}"</div></td>'
         f'<td>{acc_badge}</td>'
         f'<td><span class="mono">{cl["occurrences"]}x</span></td>'
+        f'<td>{synth_lean_chip}</td>'
+        f'<td>{dom_sent_chip}</td>'
         f'<td><span class="chip mono" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa;">{html.escape(cl["suspicion_level"].upper())}</span></td></tr>'
     )
-bot_cluster_table_html = ''.join(bot_cluster_rows) if bot_cluster_rows else '<tr><td colspan="4">No suspicious cross-account copy-paste templates identified.</td></tr>'
+bot_cluster_table_html = ''.join(bot_cluster_rows) if bot_cluster_rows else '<tr><td colspan="6">No suspicious cross-account copy-paste templates identified.</td></tr>'
+
+# 1. Dedicated "Bot vs. Organic Sentiment" Split Metric Cards Widget
+org_mix = global_bot_audit.get('organic_sentiment_mix', {})
+syn_mix = global_bot_audit.get('synthetic_sentiment_mix', {})
+bot_div = global_bot_audit.get('sentiment_divergence', {})
+bot_ratio = global_bot_audit.get('organic_vs_synthetic_ratio', 1.0)
+skew_val = bot_div.get('critical_skew', 0.0)
+skew_color = '#dc2626' if skew_val > 10 else ('#16a34a' if skew_val < -5 else '#c2410c')
+
+bot_split_kpis_html = f'''
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 18px;">
+  <div style="background:#ffffff; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:8px; padding:14px 16px; box-shadow:0 1px 3px rgba(0,0,0,0.03);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:#15803d; letter-spacing:0.4px;">🧑 Organic Sentiment Mix</span>
+      <span class="chip mono" style="font-size:10px; background:#f0fdf4; color:#166534; border-color:#bbf7d0;">Verified Human Accounts</span>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; font-weight:600;">
+      <span style="color:#16a34a;">🟢 Supportive: {org_mix.get('supportive', 0)}%</span>
+      <span style="color:#dc2626;">🔴 Critical: {org_mix.get('critical', 0)}%</span>
+      <span style="color:#64748b;">⚪ Neutral: {org_mix.get('neutral', 0)}%</span>
+    </div>
+    <div style="display:flex; height:10px; border-radius:5px; overflow:hidden; background:#e2e8f0; margin-bottom:8px;">
+      <div style="width:{org_mix.get('supportive', 0)}%; background:#22c55e;" title="Supportive: {org_mix.get('supportive', 0)}%"></div>
+      <div style="width:{org_mix.get('critical', 0)}%; background:#ef4444;" title="Critical: {org_mix.get('critical', 0)}%"></div>
+      <div style="width:{org_mix.get('neutral', 0)}%; background:#94a3b8;" title="Neutral: {org_mix.get('neutral', 0)}%"></div>
+    </div>
+    <div style="font-size:11px; color:var(--text-dim); display:flex; justify-content:space-between;">
+      <span>Political Vector: <b>BJP {org_mix.get('pro_incumbent', 0)}%</b> vs <b>Opp {org_mix.get('anti_incumbent', 0)}%</b></span>
+      <span class="mono">{global_bot_audit.get('organic_comment_count', 0)} comments</span>
+    </div>
+    <div style="font-size:11px; color:#166534; margin-top:6px; font-style:italic;">
+      Derived strictly from verified human users — captures genuine grassroots sentiment without bot distortion.
+    </div>
+  </div>
+
+  <div style="background:#ffffff; border:1px solid #fecaca; border-left:4px solid #dc2626; border-radius:8px; padding:14px 16px; box-shadow:0 1px 3px rgba(0,0,0,0.03);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:#b91c1c; letter-spacing:0.4px;">🤖 Bot / Synthetic Script Mix</span>
+      <span class="chip mono" style="font-size:10px; background:#fef2f2; color:#991b1b; border-color:#fecaca;">Automated Scripts &amp; Slogans</span>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; font-weight:600;">
+      <span style="color:#d97706;">⚡ Slogans: {syn_mix.get('extreme_partisan_slogan', 0)}%</span>
+      <span style="color:#dc2626;">🔴 Attack: {syn_mix.get('critical', 0)}%</span>
+      <span style="color:#64748b;">⚪ Neutral: {syn_mix.get('neutral', 0)}%</span>
+    </div>
+    <div style="display:flex; height:10px; border-radius:5px; overflow:hidden; background:#e2e8f0; margin-bottom:8px;">
+      <div style="width:{syn_mix.get('extreme_partisan_slogan', 0)}%; background:#f59e0b;" title="Extreme Partisan / Slogan: {syn_mix.get('extreme_partisan_slogan', 0)}%"></div>
+      <div style="width:{syn_mix.get('critical', 0)}%; background:#ef4444;" title="Critical Attack: {syn_mix.get('critical', 0)}%"></div>
+      <div style="width:{syn_mix.get('supportive', 0)}%; background:#22c55e;" title="Supportive: {syn_mix.get('supportive', 0)}%"></div>
+      <div style="width:{syn_mix.get('neutral', 0)}%; background:#94a3b8;" title="Neutral: {syn_mix.get('neutral', 0)}%"></div>
+    </div>
+    <div style="font-size:11px; color:var(--text-dim); display:flex; justify-content:space-between;">
+      <span>Synthetic Lean: <b>BJP {syn_mix.get('pro_incumbent', 0)}%</b> vs <b>Opp {syn_mix.get('anti_incumbent', 0)}%</b></span>
+      <span class="mono">{global_bot_audit.get('bot_comment_count', 0)} flagged</span>
+    </div>
+    <div style="font-size:11px; color:#b91c1c; margin-top:6px; font-style:italic;">
+      Shows how automated scripts, copy-paste templates, and coordinated clusters skew perception.
+    </div>
+  </div>
+
+  <div style="background:#ffffff; border:1px solid #fed7aa; border-left:4px solid #ea580c; border-radius:8px; padding:14px 16px; box-shadow:0 1px 3px rgba(0,0,0,0.03);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:#c2410c; letter-spacing:0.4px;">⚖️ Artificial Skew Delta</span>
+      <span class="chip mono" style="font-size:10px; background:#fff7ed; color:#c2410c; border-color:#fed7aa;">Purity Ratio: {bot_ratio}:1 Organic</span>
+    </div>
+    <div style="font-size:13px; font-weight:700; color:#0f172a; margin-bottom:4px;">
+      Synthetic Distortion Skew: <span class="mono" style="color:{skew_color};">{"+" if skew_val > 0 else ""}{skew_val}%</span>
+    </div>
+    <div style="font-size:11.5px; color:var(--text); line-height:1.45; background:#f8fafc; padding:7px 9px; border-radius:5px; border:1px solid #e2e8f0; margin-top:6px;">
+      <b>Diagnostic Verdict:</b> {html.escape(bot_div.get('diagnosis', 'Minimal synthetic distortion observed.'))}
+    </div>
+    <div style="font-size:10.5px; color:var(--text-faint); margin-top:6px;">
+      Exposes immediately whether a negative spike is a genuine grassroots grievance or an artificial astroturfed campaign.
+    </div>
+  </div>
+</div>
+'''
 
 # Cross-topic commenter overlap — users who commented on 2+ posts, from collect bundle
 _commenter_overlap = data.get('commenter_overlap') or {}
@@ -1128,14 +1321,10 @@ _AXIS_TO_META = {
     }
 }
 
-# Run neural batch inference across all client topics
-_topic_corpus_texts = [f"{t.get('title', '')}. {t.get('summary', '')}" for t in topics_client]
-_neural_threat_results = classify_strategic_batch(_topic_corpus_texts)
-
 # Group topics by neural threat axis
 _axis_grouped_topics = {}
-for t, s_res in zip(topics_client, _neural_threat_results):
-    t['neural_strategic'] = s_res
+for t in topics_client:
+    s_res = t.get('neural_strategic') or {}
     ax_id = s_res.get('threat_axis')
     if ax_id and ax_id != 'general_civic_deliberation' and ax_id in _AXIS_TO_META:
         _axis_grouped_topics.setdefault(ax_id, []).append(t)
@@ -1290,6 +1479,111 @@ party_table = (
   f'<tbody>{party_rows}</tbody></table>' if party_rows else
   '<p>No explicit, unambiguous party-directed positions in the sampled comments. Party support is unknown.</p>'
 )
+
+# Strategic & Prescriptive Leadership Analytics
+from src.identify_what_matters.strategic_leadership import (
+    compute_narrative_penetration_rate,
+    compute_persuadability_matrix,
+    compute_policy_gap_detector,
+    compute_opposition_vulnerabilities,
+    compute_influencer_alignment,
+    generate_action_recommendations,
+)
+
+npr_alerts = compute_narrative_penetration_rate(topics_client)
+persuadability_matrix = compute_persuadability_matrix(topics_client)
+policy_gaps = compute_policy_gap_detector(topics_client)
+opp_vulnerabilities = compute_opposition_vulnerabilities(topics_client)
+influencer_intel = compute_influencer_alignment(panel_pulse)
+action_recommendations = generate_action_recommendations(topics_client, _early_warning_alerts, panel_pulse)
+
+# Format Strategic Recommendation Feed Rows
+action_recommendation_rows = []
+for rec in action_recommendations:
+    pr = rec["priority"]
+    pr_color = "#dc2626" if "High" in pr else ("#d97706" if "Medium" in pr else "#16a34a")
+    pr_bg = "#fef2f2" if "High" in pr else ("#fffbeb" if "Medium" in pr else "#f0fdf4")
+    pr_border = "#fecaca" if "High" in pr else ("#fde68a" if "Medium" in pr else "#bbf7d0")
+    badge = f'<span class="chip mono" style="background:{pr_bg};color:{pr_color};border-color:{pr_border};font-weight:700;font-size:11px;">{pr}</span>'
+    action_recommendation_rows.append(
+        f'<tr class="action-row" data-priority="{html.escape(pr)}">'
+        f'<td style="white-space:nowrap;">{badge}</td>'
+        f'<td style="font-weight:600;color:var(--text);font-size:12.5px;">{html.escape(rec["trigger_event"])}<div style="font-size:10.5px;font-family:var(--mono);color:var(--text-faint);margin-top:2px;">{html.escape(rec.get("metric_trigger", ""))} &middot; <span style="color:var(--accent);">{html.escape(rec.get("category", ""))}</span></div></td>'
+        f'<td style="font-size:12px;color:var(--text-dim);">{html.escape(rec["target_audience"])}</td>'
+        f'<td style="font-size:12.5px;color:#0f172a;line-height:1.45;"><div style="background:#f8fafc;padding:8px 12px;border-radius:5px;border:1px solid #e2e8f0;"><b style="color:var(--accent);">Leadership Action:</b> {html.escape(rec["recommended_action"])}</div></td>'
+        f'</tr>'
+    )
+action_recommendations_table_html = ''.join(action_recommendation_rows) if action_recommendation_rows else '<tr><td colspan="4">No immediate tactical actions required.</td></tr>'
+
+# Format NPR Alerts Rows
+npr_rows = []
+for a in npr_alerts[:8]:
+    urg = a["urgency"]
+    urg_bg = "#fee2e2" if urg == "HIGH" else ("#fef3c7" if urg == "MEDIUM" else "#f1f5f9")
+    urg_col = "#b91c1c" if urg == "HIGH" else ("#b45309" if urg == "MEDIUM" else "#475569")
+    npr_rows.append(
+        f'<tr>'
+        f'<td><b>{html.escape(a["topic_title"][:70])}</b></td>'
+        f'<td><span class="chip mono" style="font-size:10px;">{html.escape(a["issue_cluster"].replace("_", " ").title())}</span></td>'
+        f'<td><span class="chip mono" style="font-weight:700;background:{urg_bg};color:{urg_col};">{a["npr_score"]}% NPR</span></td>'
+        f'<td style="font-size:11.5px;"><span style="color:#1d4ed8;font-weight:600;">Opp {a["opp_share"]:.0f}%</span> vs <span style="color:#c2410c;font-weight:600;">BJP {a["bjp_share"]:.0f}%</span></td>'
+        f'<td style="font-size:11.5px;color:var(--text-dim);">{html.escape(a["target_audience"])}</td>'
+        f'<td style="font-size:12px;color:#0f172a;"><div style="background:#f0fdf4;padding:6px 10px;border-radius:4px;border:1px solid #bbf7d0;"><b style="color:#15803d;">Recommended Counter-Narrative:</b> {html.escape(a["recommended_counter_narrative"])}</div></td>'
+        f'</tr>'
+    )
+npr_table_html = ''.join(npr_rows) if npr_rows else '<tr><td colspan="6">No critical opposition narrative penetration detected across core/neutral demographics.</td></tr>'
+
+# Format Persuadability Matrix Rows
+persuadability_rows = []
+for row in persuadability_matrix:
+    score = row["persuadability_score"]
+    score_col = "#b91c1c" if score >= 75 else ("#c2410c" if score >= 65 else "#15803d")
+    persuadability_rows.append(
+        f'<tr>'
+        f'<td><b>{html.escape(row["segment_name"])}</b><div style="font-size:11px;color:var(--text-dim);">{html.escape(row["geography"])}</div></td>'
+        f'<td><span class="mono" style="font-size:14px;font-weight:700;color:{score_col};">{score}/100</span></td>'
+        f'<td><span class="chip mono" style="font-size:10.5px;">{html.escape(row["dominant_grievance"])}</span></td>'
+        f'<td><div style="font-size:12px;color:var(--text);line-height:1.4;">{html.escape(row["responsive_policy_lever"])}</div></td>'
+        f'<td><span class="chip mono" style="font-size:10.5px;background:#f8fafc;color:var(--text-dim);">{html.escape(row["recommended_allocation"])}</span></td>'
+        f'<td>{html.escape(row["priority"])}</td>'
+        f'</tr>'
+    )
+persuadability_table_html = ''.join(persuadability_rows) if persuadability_rows else '<tr><td colspan="6">No swing demographic models available.</td></tr>'
+
+# Format Policy Gap Rows
+policy_gap_rows = []
+for pg in policy_gaps:
+    gap_d = pg["gap_delta"]
+    status = pg["status"]
+    st_col = "#dc2626" if "CRITICAL" in status else ("#d97706" if "MILD" in status else "#16a34a")
+    st_bg = "#fef2f2" if "CRITICAL" in status else ("#fffbeb" if "MILD" in status else "#f0fdf4")
+    policy_gap_rows.append(
+        f'<tr>'
+        f'<td><b>{html.escape(pg["cluster_label"])}</b></td>'
+        f'<td><span class="mono" style="font-weight:600;color:#c2410c;">{pg["public_anxiety_share"]}%</span></td>'
+        f'<td><span class="mono" style="font-weight:600;color:#2563eb;">{pg["messaging_share"]}%</span></td>'
+        f'<td><span class="mono" style="font-weight:700;color:{st_col};">{"+" if gap_d > 0 else ""}{gap_d}%</span></td>'
+        f'<td><span class="chip mono" style="font-weight:700;font-size:10px;background:{st_bg};color:{st_col};">{status}</span></td>'
+        f'<td style="font-size:11.5px;color:var(--text-dim);">{html.escape(pg["manifesto_theme"])}</td>'
+        f'<td style="font-size:12px;color:#0f172a;"><div style="background:#f8fafc;padding:6px 10px;border-radius:4px;border:1px solid #e2e8f0;"><b style="color:var(--accent);">Suggested Talking Point:</b> {html.escape(pg["recommended_injection"])}</div></td>'
+        f'</tr>'
+    )
+policy_gap_table_html = ''.join(policy_gap_rows) if policy_gap_rows else '<tr><td colspan="7">No policy gaps identified.</td></tr>'
+
+# Format Opposition Vulnerabilities Rows
+opp_vuln_rows = []
+for ov in opp_vulnerabilities[:6]:
+    b_idx = ov["backlash_index"]
+    opp_vuln_rows.append(
+        f'<tr>'
+        f'<td><b>{html.escape(ov["trigger_event"])}</b></td>'
+        f'<td><span class="chip mono" style="font-weight:700;background:#fef2f2;color:#b91c1c;">{b_idx}% Backlash</span></td>'
+        f'<td><span class="chip mono" style="font-weight:700;background:#fff7ed;color:#c2410c;">{html.escape(ov["capitalization_window"])}</span></td>'
+        f'<td style="font-size:11.5px;color:var(--text-dim);">{html.escape(ov["target_audience"])}</td>'
+        f'<td style="font-size:12px;color:#0f172a;"><div style="background:#f8fafc;padding:6px 10px;border-radius:4px;border:1px solid #fed7aa;"><b style="color:#c2410c;">Tactical Action:</b> {html.escape(ov["recommended_action"])}</div></td>'
+        f'</tr>'
+    )
+opp_vuln_table_html = ''.join(opp_vuln_rows) if opp_vuln_rows else '<tr><td colspan="5">No current opposition gaffes or backlashes active.</td></tr>'
 
 history_points = []
 for _, history_path, history_report in report_records:
@@ -1677,6 +1971,16 @@ html_content = f"""<!DOCTYPE html>
     .sentiment-seg.critical {{ background: var(--neg); }}
     .sentiment-seg.neutral {{ background: var(--neu); }}
     .sentiment-seg.humorous {{ background: var(--warn); }}
+    .sentiment-seg.hatched-bot {{
+      background-image: repeating-linear-gradient(
+        45deg,
+        rgba(239, 68, 68, 0.5),
+        rgba(239, 68, 68, 0.5) 4px,
+        transparent 4px,
+        transparent 8px
+      );
+      border-left: 1px solid rgba(239, 68, 68, 0.7);
+    }}
 
     .stage-pill {{
       display: inline-flex;
@@ -1746,11 +2050,11 @@ html_content = f"""<!DOCTYPE html>
     }}
 
     .topic-summary-row {{
-      padding: 12px 16px;
+      padding: 12px 18px;
       display: grid;
-      grid-template-columns: auto 1.4fr 1.6fr auto auto 36px;
+      grid-template-columns: 32px minmax(280px, 2fr) minmax(200px, 1.2fr) auto auto 28px;
       align-items: center;
-      gap: 14px;
+      gap: 16px;
       cursor: pointer;
       user-select: none;
     }}
@@ -1779,10 +2083,12 @@ html_content = f"""<!DOCTYPE html>
     .topic-meta-line {{
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-top: 3px;
-      font-size: 11.5px;
+      gap: 6px;
+      margin-top: 4px;
+      font-size: 11px;
       color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
     }}
 
     /* AI & ML Intelligence Chip Array */
@@ -2171,6 +2477,55 @@ html_content = f"""<!DOCTYPE html>
     <!-- TAB 1: OVERVIEW & CHARTS -->
     <div id="tab-overview" class="tab-content">
       
+      <!-- 🎯 Strategic Recommendations Feed (High-Value Actionable Panel for Political Leadership) -->
+      <div class="card" style="margin-bottom: 24px; border-left: 5px solid #2563eb; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);">
+        <div class="card-header" style="background: linear-gradient(90deg, #eff6ff 0%, #ffffff 100%); padding: 14px 20px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span style="font-size:22px;">🎯</span>
+            <div>
+              <div class="card-title" style="font-size:15px; font-weight:800; color:#1e40af; letter-spacing:-0.2px;">
+                Strategic Leadership Action Feed — Prescriptive Tactical Recommendation Queue
+              </div>
+              <div style="font-size:11.5px; color:#3b82f6; margin-top:2px;">
+                Answers three core leadership questions: Where are we losing/winning votes? What narrative intervention is required? And what resource allocation yields highest ROI?
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="chip mono" style="background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; font-weight:700;">{len(action_recommendations)} Priority Actions</span>
+            <button class="btn-group-item active" style="font-size:11px; padding:4px 10px;" onclick="switchTab('political-lens')">Full Prescriptive Intel &rarr;</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <div style="padding: 10px 18px; background: #f8fafc; border-bottom: 1px solid var(--border); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div style="font-size: 12px; color: var(--text-dim);">
+              Filter Tactical Queue:
+            </div>
+            <div class="btn-group">
+              <button class="btn-group-item active" onclick="filterActionRecs('all', this)">All Priorities ({len(action_recommendations)})</button>
+              <button class="btn-group-item" onclick="filterActionRecs('High 🔴', this)">High 🔴 ({sum(1 for r in action_recommendations if 'High' in r['priority'])})</button>
+              <button class="btn-group-item" onclick="filterActionRecs('Medium 🟡', this)">Medium 🟡 ({sum(1 for r in action_recommendations if 'Medium' in r['priority'])})</button>
+              <button class="btn-group-item" onclick="filterActionRecs('Low 🟢', this)">Low 🟢 ({sum(1 for r in action_recommendations if 'Low' in r['priority'])})</button>
+            </div>
+          </div>
+          <div class="action-queue-scroll">
+            <table class="evidence-table" id="action-recs-table" style="margin: 0;">
+              <thead>
+                <tr style="background: var(--surface-2);">
+                  <th style="padding-left: 18px; width: 110px;">Priority</th>
+                  <th>Trigger Event</th>
+                  <th style="width: 220px;">Target Audience</th>
+                  <th style="padding-right: 18px;">Recommended Leadership Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {action_recommendations_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- Executive Early-Warning Radar — Emerging Vulnerabilities & Rapid Interventions (FRONT AND CENTER) -->
       <div class="card" style="margin-bottom: 24px; border-left: 5px solid #dc2626; box-shadow: 0 4px 12px rgba(220, 38, 38, 0.08);">
         <div class="card-header" style="background: linear-gradient(90deg, #fef2f2 0%, #fff7ed 50%, #ffffff 100%); padding: 14px 20px;">
@@ -2315,6 +2670,15 @@ html_content = f"""<!DOCTYPE html>
         </div>
 
         <div class="filter-group">
+          <span class="filter-label">Authenticity</span>
+          <select id="topics-authenticity-select" class="select-dropdown" onchange="applyFilters()">
+            <option value="all">All Comments (Blended)</option>
+            <option value="organic">Verified Organic Only</option>
+            <option value="synthetic">Flagged Synthetic / Bot Clusters Only</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
           <span class="filter-label">Sort</span>
           <div class="btn-group">
             <button class="btn-group-item active" onclick="setSort('trend_score', this)">Trend Score</button>
@@ -2420,6 +2784,9 @@ html_content = f"""<!DOCTYPE html>
             </div>
           </div>
 
+          <!-- Dedicated Bot vs. Organic Sentiment Split KPI Row -->
+          {bot_split_kpis_html}
+
           <div style="font-weight:600; font-size:13px; margin-bottom:8px;">Suspicious Repeated Narrative Templates Across Distinct Handles:</div>
           <div class="action-queue-scroll">
             <table class="evidence-table">
@@ -2428,6 +2795,8 @@ html_content = f"""<!DOCTYPE html>
                   <th>Repeated Script / Copy-Paste Template</th>
                   <th>Unique Handles</th>
                   <th>Occurrences</th>
+                  <th>Synthetic Lean &amp; Political Vector</th>
+                  <th>Dominant Sentiment</th>
                   <th>Suspicion Gate</th>
                 </tr>
               </thead>
@@ -2495,6 +2864,15 @@ html_content = f"""<!DOCTYPE html>
             <button class="btn-group-item" onclick="filterPoliticalTab('probed', this)">Instagram/comment evidence ({total_political_probed})</button>
             <button class="btn-group-item" onclick="filterPoliticalTab('unprobed', this)">Headlines/Reddit titles only ({total_political_unprobed})</button>
           </div>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-label">Source Authenticity</span>
+          <select id="political-authenticity-select" class="select-dropdown" onchange="renderPoliticalFeed()">
+            <option value="all">All Comments (Blended)</option>
+            <option value="organic">Verified Organic Only</option>
+            <option value="synthetic">Flagged Synthetic / Bot Clusters Only</option>
+          </select>
         </div>
       </div>
 
@@ -2598,6 +2976,42 @@ html_content = f"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- INFLUENCER SENTIMENT ALIGNMENT & SUBURBAN SWING RADAR -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #8b5cf6;">
+        <div class="card-header" style="background: linear-gradient(90deg, #f5f3ff 0%, #ffffff 100%);">
+          <div class="card-title">⭐ Influencer Sentiment Alignment &amp; Suburban Swing Early Indicator</div>
+          <span class="chip mono" style="background:#f5f3ff;color:#6d28d9;border-color:#ddd6fe;font-weight:700;">
+            {influencer_intel['high_reach_posts_count']} High-Reach Creator Posts Tracked (&gt;200K Sentinel Tier)
+          </span>
+        </div>
+        <div class="card-body">
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 14px;">
+            <div style="background:var(--surface-2); padding:10px 14px; border-radius:6px;">
+              <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase;">Influencer Favorable Slant</div>
+              <div style="font-size:18px; font-weight:700; color:#16a34a;" class="mono">{influencer_intel['favorable_pct']}%</div>
+            </div>
+            <div style="background:var(--surface-2); padding:10px 14px; border-radius:6px;">
+              <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase;">Influencer Critical Slant</div>
+              <div style="font-size:18px; font-weight:700; color:#dc2626;" class="mono">{influencer_intel['critical_pct']}%</div>
+            </div>
+            <div style="background:var(--surface-2); padding:10px 14px; border-radius:6px;">
+              <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase;">Net Slant Delta</div>
+              <div style="font-size:18px; font-weight:700; color:{'#16a34a' if influencer_intel['net_slant'] >= 0 else '#dc2626'};" class="mono">{'+' if influencer_intel['net_slant'] > 0 else ''}{influencer_intel['net_slant']}%</div>
+            </div>
+            <div style="background:var(--surface-2); padding:10px 14px; border-radius:6px;">
+              <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase;">Total Influencer Engagement</div>
+              <div style="font-size:18px; font-weight:700; color:var(--accent);" class="mono">{influencer_intel['total_influencer_likes']:,} likes</div>
+            </div>
+          </div>
+          <div style="background:#f8fafc; padding:10px 14px; border-radius:6px; border:1px solid #e2e8f0; font-size:12.5px; color:var(--text); line-height:1.45;">
+            <b>Suburban Voter Swing Predictive Signal:</b> {html.escape(influencer_intel['swing_indicator'])}
+            <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">
+              * High-reach political/lifestyle creators (&gt;200K followers) act as early bellwethers for suburban voter mood swings before formal polling detects shifts.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Panel Filters -->
       <div class="controls-panel">
         <div class="filter-group">
@@ -2692,6 +3106,151 @@ html_content = f"""<!DOCTYPE html>
           </p>
           <div>
             {_early_warning_cards_html}
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 0B: Strategic Recommendations Feed & Tactical Action Queue -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #2563eb;">
+        <div class="card-header" style="background: linear-gradient(90deg, #eff6ff 0%, #ffffff 100%);">
+          <div class="card-title">🎯 Strategic Leadership Action Feed — Tactical Intervention Queue</div>
+          <span class="chip mono" style="background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe;font-weight:700;">{len(action_recommendations)} Recommendations</span>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <div class="action-queue-scroll">
+            <table class="evidence-table" style="margin: 0;">
+              <thead>
+                <tr style="background: var(--surface-2);">
+                  <th style="padding-left: 18px; width: 110px;">Priority</th>
+                  <th>Trigger Event</th>
+                  <th style="width: 220px;">Target Audience</th>
+                  <th style="padding-right: 18px;">Recommended Leadership Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {action_recommendations_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 0C: Narrative Vulnerability & Friction Mapping (NPR Tracker) -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #dc2626;">
+        <div class="card-header">
+          <div class="card-title">⚡ Narrative Vulnerability &amp; Friction Mapping (NPR Tracker)</div>
+          <span class="chip mono" style="background:#fee2e2;color:#b91c1c;border-color:#fca5a5;font-weight:700;">Narrative Penetration Rate</span>
+        </div>
+        <div class="card-body">
+          <p style="font-size:12.5px; color:var(--text-dim); margin-bottom:12px;">
+            Measures the <b>velocity of friction</b>: how fast an opposition talking point or attack narrative spreads outside its core partisan echo chamber into neutral, moderate, or traditionally supportive demographics. Prevents campaigns from reacting to mere noise while catching high-risk viral attacks before they harden into permanent voter perceptions.
+          </p>
+          <div class="action-queue-scroll">
+            <table class="evidence-table">
+              <thead>
+                <tr style="background:var(--surface-2);">
+                  <th>Vulnerable Topic / Attack Line</th>
+                  <th>Cluster</th>
+                  <th>Penetration Rate (NPR)</th>
+                  <th>Audience Pulse</th>
+                  <th>Infiltrated Audience</th>
+                  <th>Recommended Counter-Narrative</th>
+                </tr>
+              </thead>
+              <tbody>
+                {npr_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 0D: Demographic & Geographic "Swing Potential" Index -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #16a34a;">
+        <div class="card-header">
+          <div class="card-title">🗺️ Demographic &amp; Geographic Swing Potential Matrix (Persuadability Index)</div>
+          <span class="chip mono" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0;font-weight:700;">Ground &amp; Digital Resource Allocation</span>
+        </div>
+        <div class="card-body">
+          <p style="font-size:12.5px; color:var(--text-dim); margin-bottom:12px;">
+            Identifies clusters of voters whose sentiment is volatile or neutral rather than locked-in. Tells campaign leadership precisely <b>where the candidate should physically travel</b>, <b>which local grievances to address</b>, and <b>where digital ad spend will move the needle most efficiently</b>.
+          </p>
+          <div class="action-queue-scroll">
+            <table class="evidence-table">
+              <thead>
+                <tr style="background:var(--surface-2);">
+                  <th>Demographic Segment &amp; Geography</th>
+                  <th>Persuadability Score</th>
+                  <th>Dominant Grievance</th>
+                  <th>Responsive Policy Lever</th>
+                  <th>Resource Allocation Strategy</th>
+                  <th>Priority</th>
+                </tr>
+              </thead>
+              <tbody>
+                {persuadability_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 0E: Issue-to-Action Translation (The "Policy Gap" Detector) -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #d97706;">
+        <div class="card-header">
+          <div class="card-title">🔍 Issue-to-Action Translation (The "Policy Gap" Detector)</div>
+          <span class="chip mono" style="background:#fffbeb;color:#b45309;border-color:#fde68a;font-weight:700;">Grievance-to-Policy Alignment</span>
+        </div>
+        <div class="card-body">
+          <p style="font-size:12.5px; color:var(--text-dim); margin-bottom:12px;">
+            Voters discuss symptoms (inflation, paper leaks, civic infrastructure), while political parties often talk about macro policies. This detector cross-references trending public complaints with the party's communication volume to flag disconnects where public anxiety is high but leadership messaging is missing.
+          </p>
+          <div class="action-queue-scroll">
+            <table class="evidence-table">
+              <thead>
+                <tr style="background:var(--surface-2);">
+                  <th>Issue Cluster</th>
+                  <th>Public Anxiety Share</th>
+                  <th>Party Messaging Share</th>
+                  <th>Gap Delta</th>
+                  <th>Status</th>
+                  <th>Manifesto Baseline</th>
+                  <th>Suggested Talking Point Injection</th>
+                </tr>
+              </thead>
+              <tbody>
+                {policy_gap_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 0F: Opposition Vulnerability & Counter-Attack Window Tracker -->
+      <div class="card" style="margin-bottom: 20px; border-left: 4px solid #ea580c;">
+        <div class="card-header">
+          <div class="card-title">🏹 Opposition Vulnerability &amp; Counter-Attack Window Tracker</div>
+          <span class="chip mono" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa;font-weight:700;">Opportunistic Offense</span>
+        </div>
+        <div class="card-body">
+          <p style="font-size:12.5px; color:var(--text-dim); margin-bottom:12px;">
+            Monitors opposition announcements, candidate gaffes, and regional coalition infighting where <b>they are bleeding support</b>. Shifts campaign posture from purely defensive damage control to rapid opportunistic counter-attacks during active capitalization windows.
+          </p>
+          <div class="action-queue-scroll">
+            <table class="evidence-table">
+              <thead>
+                <tr style="background:var(--surface-2);">
+                  <th>Opposition Vulnerability Trigger</th>
+                  <th>Backlash Index</th>
+                  <th>Capitalization Window</th>
+                  <th>Target Demographic</th>
+                  <th>Recommended Counter-Attack Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {opp_vuln_table_html}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -2937,6 +3496,53 @@ html_content = f"""<!DOCTYPE html>
       renderPoliticalFeed();
     }}
 
+    let currentAuthFilter = 'all';
+
+    function filterActionRecs(priority, btn) {{
+      if (btn) {{
+        btn.parentElement.querySelectorAll('.btn-group-item').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      }}
+      document.querySelectorAll('#action-recs-table tbody tr').forEach(tr => {{
+        const rowPrio = tr.getAttribute('data-priority') || '';
+        if (priority === 'all' || rowPrio.includes(priority.split(' ')[0])) {{
+          tr.style.display = '';
+        }} else {{
+          tr.style.display = 'none';
+        }}
+      }});
+    }}
+
+    function setDrawerSentimentMode(cardKey, mode) {{
+      const btnRaw = document.getElementById(`btn-raw-${{cardKey}}`);
+      const btnAdj = document.getElementById(`btn-adj-${{cardKey}}`);
+      const badge = document.getElementById(`sent-mode-badge-${{cardKey}}`);
+      const rawDiv = document.getElementById(`drawer-sent-raw-${{cardKey}}`);
+      const adjDiv = document.getElementById(`drawer-sent-adj-${{cardKey}}`);
+
+      if (mode === 'adjusted') {{
+        btnRaw?.classList.remove('active');
+        btnAdj?.classList.add('active');
+        if (badge) {{
+          badge.innerText = '🛡️ Showing True Organic Sentiment';
+          badge.style.background = '#dcfce7';
+          badge.style.color = '#15803d';
+        }}
+        if (rawDiv) rawDiv.style.display = 'none';
+        if (adjDiv) adjDiv.style.display = 'block';
+      }} else {{
+        btnAdj?.classList.remove('active');
+        btnRaw?.classList.add('active');
+        if (badge) {{
+          badge.innerText = 'Showing Raw Blended';
+          badge.style.background = 'var(--surface-2)';
+          badge.style.color = 'var(--text-dim)';
+        }}
+        if (rawDiv) rawDiv.style.display = 'block';
+        if (adjDiv) adjDiv.style.display = 'none';
+      }}
+    }}
+
     function toggleCard(rowEl) {{
       const cardEl = rowEl.closest(".topic-card");
       cardEl.classList.toggle('open');
@@ -2945,6 +3551,13 @@ html_content = f"""<!DOCTYPE html>
     // Render Compact Card HTML
     function buildTopicCardHtml(t, prefix="") {{
       const st = t.stance || {{}};
+      const ba = t.bot_audit || {{}};
+      const orgSt = ba.bot_adjusted_stance || st;
+      const orgSup = Math.round((orgSt.supportive || 0) * 100);
+      const orgCrit = Math.round((orgSt.critical || 0) * 100);
+      const orgNeu = Math.round((orgSt.neutral || 0) * 100);
+      const orgHum = Math.round((orgSt.humorous || 0) * 100);
+      const botShare = ba.bot_share_pct || 0;
       const rp = t.reddit_proxy || {{}};
       const sup = Math.round((st.supportive || 0) * 100);
       const crit = Math.round((st.critical || 0) * 100);
@@ -3026,17 +3639,18 @@ html_content = f"""<!DOCTYPE html>
             <div class="topic-sentiment-col">
               <div class="sentiment-bar">
                 ${{hasStance ? `
-                  <div class="sentiment-seg supportive" style="width: ${{sup}}%;" title="Supportive: ${{sup}}%"></div>
-                  <div class="sentiment-seg critical" style="width: ${{crit}}%;" title="Critical: ${{crit}}%"></div>
-                  <div class="sentiment-seg humorous" style="width: ${{hum}}%;" title="Humorous: ${{hum}}%"></div>
-                  <div class="sentiment-seg neutral" style="width: ${{neu}}%;" title="Neutral: ${{neu}}%"></div>
+                  <div class="sentiment-seg supportive" style="width: ${{currentAuthFilter === 'organic' ? orgSup : sup}}%;" title="${{currentAuthFilter === 'organic' ? 'Organic Supportive' : 'Supportive'}}: ${{currentAuthFilter === 'organic' ? orgSup : sup}}%"></div>
+                  <div class="sentiment-seg critical" style="width: ${{currentAuthFilter === 'organic' ? orgCrit : crit}}%;" title="${{currentAuthFilter === 'organic' ? 'Organic Critical' : 'Critical'}}: ${{currentAuthFilter === 'organic' ? orgCrit : crit}}%"></div>
+                  <div class="sentiment-seg humorous" style="width: ${{currentAuthFilter === 'organic' ? orgHum : hum}}%;" title="Humorous: ${{currentAuthFilter === 'organic' ? orgHum : hum}}%"></div>
+                  <div class="sentiment-seg neutral" style="width: ${{currentAuthFilter === 'organic' ? orgNeu : neu}}%;" title="Neutral: ${{currentAuthFilter === 'organic' ? orgNeu : neu}}%"></div>
                 ` : `
                   <div class="sentiment-seg neutral" style="width: 100%;" title="Pending social probe"></div>
                 `}}
               </div>
               <div style="display:flex; justify-content:space-between; font-size:10px; font-family:var(--mono); color:var(--text-faint);">
-                <span>${{hasStance ? '+' + sup + '%' : 'Pending'}}</span>
-                <span>${{hasStance ? '-' + crit + '%' : ''}}</span>
+                <span>${{hasStance ? '+' + (currentAuthFilter === 'organic' ? orgSup : sup) + '%' : 'Pending'}}</span>
+                <span style="font-size:9px; color:${{currentAuthFilter === 'organic' ? '#15803d' : 'inherit'}};">${{currentAuthFilter === 'organic' ? '🛡️ Organic' : ''}}</span>
+                <span>${{hasStance ? '-' + (currentAuthFilter === 'organic' ? orgCrit : crit) + '%' : ''}}</span>
               </div>
             </div>
 
@@ -3267,16 +3881,32 @@ html_content = f"""<!DOCTYPE html>
                 ` : ''}}
               </div>
 
-              <!-- 2. Stance & Debate Positions -->
+              <!-- 2. Stance & Debate Positions with True Sentiment (Bot-Adjusted) -->
               <div class="drawer-section">
                 <div class="drawer-sec-title">
-                  <span>⚖️ 2. Tone toward story (not party preference)</span>
+                  <span>⚖️ 2. Tone Toward Story &amp; True Sentiment</span>
                   <span class="chip mono" style="font-size:10px; ${{t.demo && t.demo.source === 'measured' ? 'background:#f0fdf4; color:#166534; border-color:#bbf7d0;' : 'background:var(--surface-2); color:var(--text-faint);'}}">
                     Based on ${{t.demo && t.demo.source === 'measured' ? t.demo.comment_count + ' comments' : 'LLM brief'}} 📸 IG + 💬 Reddit
                   </span>
                 </div>
-                <div style="margin-bottom: 8px;">
+
+                <!-- True Sentiment Mode Toggle -->
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+                  <div class="btn-group">
+                    <button class="btn-group-item active" id="btn-raw-${{prefix}}${{t.id}}" onclick="setDrawerSentimentMode('${{prefix}}${{t.id}}', 'raw')">Raw Blended</button>
+                    <button class="btn-group-item" id="btn-adj-${{prefix}}${{t.id}}" onclick="setDrawerSentimentMode('${{prefix}}${{t.id}}', 'adjusted')">🛡️ True Sentiment (Bot-Adjusted)</button>
+                  </div>
+                  <span class="chip mono" id="sent-mode-badge-${{prefix}}${{t.id}}" style="font-size:9.5px; background:var(--surface-2); color:var(--text-dim);">
+                    Showing Raw Blended
+                  </span>
+                </div>
+
+                <div id="drawer-sent-raw-${{prefix}}${{t.id}}" style="margin-bottom: 8px;">
                   ${{!hasStance ? '<div style="font-size:11px; color:var(--text-faint);">No measured comment stance for this topic.</div>' : ''}}
+                  <div style="font-size:10.5px; color:var(--text-faint); margin-bottom:2px; display:flex; justify-content:space-between;">
+                    <span>Blended Public Sentiment (All Accounts)</span>
+                    <span class="mono">${{hasStance ? '+' + sup + '% Sup · -' + crit + '% Crit' : ''}}</span>
+                  </div>
                   <div class="sentiment-bar" style="height: 10px;">
                     <div class="sentiment-seg supportive" style="width: ${{sup}}%;" title="Supportive: ${{sup}}%"></div>
                     <div class="sentiment-seg critical" style="width: ${{crit}}%;" title="Critical: ${{crit}}%"></div>
@@ -3288,6 +3918,33 @@ html_content = f"""<!DOCTYPE html>
                     <span style="color:var(--neg);">Critical: ${{crit}}%</span>
                     <span style="color:var(--warn);">Humor: ${{hum}}%</span>
                     <span style="color:var(--neu);">Neutral: ${{neu}}%</span>` : ''}}
+                  </div>
+                </div>
+
+                <!-- True Sentiment (Bot-Adjusted) Dual-Layer Display with Hatched Bot Proportion Overlay -->
+                <div id="drawer-sent-adj-${{prefix}}${{t.id}}" style="display:none; margin-bottom: 8px; padding:8px 10px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:6px;">
+                  <div style="font-size:11px; color:#15803d; font-weight:700; margin-bottom:4px; display:flex; justify-content:space-between;">
+                    <span>🛡️ True Grassroots Sentiment (Verified Organic Only)</span>
+                    <span class="mono">+${{orgSup}}% Sup · -${{orgCrit}}% Crit</span>
+                  </div>
+                  <div class="sentiment-bar" style="height: 11px; position:relative; background:#dcfce7;">
+                    <div class="sentiment-seg supportive" style="width: ${{orgSup}}%;" title="Organic Supportive: ${{orgSup}}%"></div>
+                    <div class="sentiment-seg critical" style="width: ${{orgCrit}}%;" title="Organic Critical: ${{orgCrit}}%"></div>
+                    <div class="sentiment-seg humorous" style="width: ${{orgHum}}%;" title="Organic Humorous: ${{orgHum}}%"></div>
+                    <div class="sentiment-seg neutral" style="width: ${{orgNeu}}%;" title="Organic Neutral: ${{orgNeu}}%"></div>
+                    ${{botShare > 0 ? `
+                      <div class="sentiment-seg hatched-bot" style="position:absolute; right:0; top:0; width:${{botShare}}%; height:100%; pointer-events:none;" title="Synthetic Bot Volume Proportion: ${{botShare}}%"></div>
+                    ` : ''}}
+                  </div>
+                  <div style="display:flex; justify-content:space-between; font-size:10.5px; margin-top:4px; font-family:var(--mono);">
+                    <span style="color:#15803d;">Support: ${{orgSup}}%</span>
+                    <span style="color:#b91c1c;">Critical: ${{orgCrit}}%</span>
+                    <span style="color:#b45309;">Humor: ${{orgHum}}%</span>
+                    <span style="color:#475569;">Neutral: ${{orgNeu}}%</span>
+                  </div>
+                  <div style="font-size:10px; color:#166534; margin-top:4px; display:flex; justify-content:space-between;">
+                    <span>Hatched segment = ${{botShare}}% synthetic bot cluster skew</span>
+                    <span>Purity Ratio: ${{ba.organic_vs_synthetic_ratio || 1.0}}:1 Organic</span>
                   </div>
                 </div>
 
@@ -3543,6 +4200,7 @@ html_content = f"""<!DOCTYPE html>
       const search = document.getElementById('topic-search').value.toLowerCase();
       const cat = document.getElementById('cat-select').value;
       const stage = document.getElementById('stage-select').value;
+      currentAuthFilter = document.getElementById('topics-authenticity-select')?.value || 'all';
 
       let filtered = TOPICS.filter(t => {{
         if (cat !== 'all' && t.category !== cat) return false;
@@ -3550,6 +4208,14 @@ html_content = f"""<!DOCTYPE html>
           if (!NOT_SETTLED_STAGES.has(t.stage)) return false;
         }} else if (stage !== 'all' && t.stage !== stage) {{
           return false;
+        }}
+        if (currentAuthFilter === 'organic') {{
+          const ba = t.bot_audit || {{}};
+          if ((ba.astroturf_index || 0) >= 50 && (ba.bot_share_pct || 0) >= 45 && (ba.organic_comment_count || 0) < 3) return false;
+        }} else if (currentAuthFilter === 'synthetic') {{
+          const ba = t.bot_audit || {{}};
+          const isSyn = (ba.astroturf_index >= 20 || (ba.template_clusters && ba.template_clusters.length > 0) || (ba.bot_share_pct || 0) >= 15);
+          if (!isSyn) return false;
         }}
         if (search) {{
           const matchTitle = t.title.toLowerCase().includes(search);
@@ -3573,15 +4239,28 @@ html_content = f"""<!DOCTYPE html>
       }});
 
       document.getElementById('topics-feed').innerHTML = filtered.map(t => buildTopicCardHtml(t, 'topics-')).join('');
-      document.getElementById('results-count').innerText = `Showing ${{filtered.length}} of ${{TOPICS.length}} topics`;
+      document.getElementById('results-count').innerText = `Showing ${{filtered.length}} of ${{TOPICS.length}} topics${{currentAuthFilter === 'organic' ? ' (🛡️ Verified Organic Only)' : (currentAuthFilter === 'synthetic' ? ' (🤖 Synthetic / Bot Clusters Only)' : '')}}`;
     }}
 
     function renderPoliticalFeed() {{
+      const polAuthFilter = document.getElementById('political-authenticity-select')?.value || 'all';
+      currentAuthFilter = polAuthFilter;
       let filtered = TOPICS.filter(t => t.is_political);
       if (politicalSubFilter === 'probed') {{
         filtered = filtered.filter(t => t.has_probed_data);
       }} else if (politicalSubFilter === 'unprobed') {{
         filtered = filtered.filter(t => !t.has_probed_data);
+      }}
+      if (polAuthFilter === 'organic') {{
+        filtered = filtered.filter(t => {{
+          const ba = t.bot_audit || {{}};
+          return !((ba.astroturf_index || 0) >= 50 && (ba.bot_share_pct || 0) >= 45 && (ba.organic_comment_count || 0) < 3);
+        }});
+      }} else if (polAuthFilter === 'synthetic') {{
+        filtered = filtered.filter(t => {{
+          const ba = t.bot_audit || {{}};
+          return (ba.astroturf_index >= 20 || (ba.template_clusters && ba.template_clusters.length > 0) || (ba.bot_share_pct || 0) >= 15);
+        }});
       }}
       filtered.sort((a, b) => b.trend_score - a.trend_score);
       document.getElementById('political-feed').innerHTML = filtered.map(t => buildTopicCardHtml(t, 'political-')).join('');

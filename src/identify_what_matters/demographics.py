@@ -64,17 +64,20 @@ def _get_neural_demographics_model():
             model.mental_head.load_state_dict(ckpt["mental_head"])
             model.age_head.load_state_dict(ckpt["age_head"])
             model.eval()
-            model.to(_DEVICE)
+            try:
+                model.to(_DEVICE)
+            except Exception:
+                model.to("cpu")
             _NEURAL_DEMO_MODEL = model
             _NEURAL_DEMO_CONFIG = ckpt.get("config", {})
         except Exception:
-            _NEURAL_DEMO_MODEL = None
-    return _NEURAL_DEMO_TOKENIZER, _NEURAL_DEMO_MODEL, _NEURAL_DEMO_CONFIG
+            _NEURAL_DEMO_MODEL = False
+    return _NEURAL_DEMO_TOKENIZER, (_NEURAL_DEMO_MODEL if _NEURAL_DEMO_MODEL is not False else None), _NEURAL_DEMO_CONFIG
 
 _NEURAL_DEMO_CACHE: dict[str, tuple] = {}
 
 
-def prewarm_neural_demographics(texts: list[str], batch_size: int = 64) -> None:
+def prewarm_neural_demographics(texts: list[str], batch_size: int = 32) -> None:
     """Run the contrastive demographic model over unseen texts in padded batches and cache (mental, age) softmax vectors."""
     tok, mod, _ = _get_neural_demographics_model()
     if tok is None or mod is None:
@@ -92,6 +95,9 @@ def prewarm_neural_demographics(texts: list[str], batch_size: int = 64) -> None:
             a_probs = torch.softmax(a_logits, dim=-1).cpu().numpy()
         for text, m_p, a_p in zip(chunk, m_probs, a_probs):
             _NEURAL_DEMO_CACHE[text] = (m_p, a_p)
+    if device.type == "cuda":
+        mod.to("cpu")
+        torch.cuda.empty_cache()
 
 
 def _neural_demo_probs(text: str):
@@ -130,10 +136,13 @@ def _get_bert_party_model():
             _BERT_PARTY_TOKENIZER = AutoTokenizer.from_pretrained(BERT_PARTY_DIR)
             _BERT_PARTY_MODEL = AutoModelForSequenceClassification.from_pretrained(BERT_PARTY_DIR)
             _BERT_PARTY_MODEL.eval()
-            _BERT_PARTY_MODEL.to(_DEVICE)
+            try:
+                _BERT_PARTY_MODEL.to(_DEVICE)
+            except Exception:
+                _BERT_PARTY_MODEL.to("cpu")
         except Exception:
-            _BERT_PARTY_MODEL = None
-    return _BERT_PARTY_TOKENIZER, _BERT_PARTY_MODEL
+            _BERT_PARTY_MODEL = False
+    return _BERT_PARTY_TOKENIZER, (_BERT_PARTY_MODEL if _BERT_PARTY_MODEL is not False else None)
 
 _NEURAL_PARTY_CACHE: dict[str, tuple[str, float] | None] = {}
 
@@ -144,7 +153,7 @@ def _party_idx2label(mod) -> list[str]:
     return ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
 
 
-def prewarm_party_neural(texts: list[str], batch_size: int = 64) -> None:
+def prewarm_party_neural(texts: list[str], batch_size: int = 32) -> None:
     """Run the party model over unseen texts in padded batches and cache (label, confidence) results."""
     tok, mod = _get_bert_party_model()
     if tok is None or mod is None:
@@ -163,6 +172,9 @@ def prewarm_party_neural(texts: list[str], batch_size: int = 64) -> None:
             conf, idx = probs.max(dim=-1)
         for text, i, c in zip(chunk, idx.tolist(), conf.tolist()):
             _NEURAL_PARTY_CACHE[text] = (idx2party[i] if i < len(idx2party) else "None", float(c))
+    if device.type == "cuda":
+        mod.to("cpu")
+        torch.cuda.empty_cache()
 
 
 def predict_party_neural(text: str) -> tuple[str, float] | None:

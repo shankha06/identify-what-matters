@@ -239,18 +239,25 @@ mindmap
       13 issue clusters
       Incumbent lean
       Targets and narratives
+      Source authenticity filtering
     Undercurrent
       Subterranean friction ranking
       Framing vs. reaction gap
       Bot-discounted scores
     Panel Pulse
       Sentinel account activity
-      Flame post alerts
+      High-reach (>200K) influencer tracking
+      Influencer sentiment alignment
+      Suburban swing early warning
       Comment-to-like ratio shocks
     Political Lens
+      Strategic action recommendations feed
+      Narrative penetration rate (NPR)
+      Demographic swing potential matrix
+      Issue-to-action policy gap detector
+      Opposition vulnerability capitalization windows
       Party favorability pulse
       Socio-religious cross-tabs
-      Verbatim quotes
     Reddit
       Subreddit signals
       Hot and top thread sentiment
@@ -261,9 +268,54 @@ mindmap
 Each topic opens a drawer with:
 
 - Brief, caution flags, and audit status
+- **True Sentiment (Bot-Adjusted)** toggle and dual-layer hatched bar separating human grassroots sentiment from synthetic bot skew
 - Opinion split by side, with example comments
 - Audience urgency and credibility badges
 - Source attribution for post framing and comment reaction
+
+### 8.1 Bot vs. Organic Sentiment & Coordination Radar
+
+To prevent political leadership and analysts from over-reacting to manufactured social media controversies, the platform provides dedicated authenticity separation:
+
+1. **Dedicated Bot vs. Organic Sentiment Split KPI Cards**:
+   - Compares **Organic Sentiment Mix** (derived strictly from verified human commenters: Supportive %, Critical %, Neutral %, Non-partisan %) directly against **Bot/Synthetic Sentiment Mix** (canned campaign slogans, extreme partisan attacks, artificial polarization).
+   - Generates a real-time **Astroturf Skew Delta** and diagnostic verdict (`🚨 Artificial Astroturfed Attack` vs `⚠️ Genuine Grassroots Discontent` vs `✅ Authentic Civic Discourse`).
+
+2. **Bot-Adjusted Sentiment Bars**:
+   - Dual-layer sentiment bar within topic expansion drawers: renders true human sentiment alongside a hatched overlay segment illustrating the volume driven by automated bot clusters.
+   - Interactive toggle switching between raw blended public sentiment and bot-adjusted organic sentiment.
+
+3. **Source Authenticity Filter in Global Controls**:
+   - Controls panel dropdown enabling one-click filtering across `[ All Comments (Blended) ]`, `[ Verified Organic Only ]`, and `[ Flagged Synthetic / Bot Clusters Only ]`.
+
+4. **Semantic Bot-Cluster Sentiment Matrix Table**:
+   - Enriches repeated copy-paste comment templates with explicit **Synthetic Lean & Political Vector** (e.g. `🟠 100% Pro-Incumbent / Nationalist`, `🔵 100% Anti-Incumbent / Opposition`) and **Dominant Sentiment**, mapping exact bot scripts directly to their partisan source.
+
+### 8.2 Prescriptive Analytics for Political Leadership
+
+Moves the system from a descriptive monitor ("what people are saying") to a prescriptive tactical engine ("what action political leadership should take next"):
+
+1. **Narrative Vulnerability & Friction Mapping (NPR Tracker)**:
+   - Measures the **Narrative Penetration Rate (NPR)**: the velocity with which an opposition talking point spreads outside its echo chamber into neutral or supportive voter cohorts.
+   - Triggers automated alerts with targeted counter-narrative recommendations within 24-48 hour response windows.
+
+2. **Demographic & Geographic Swing Potential Matrix (Persuadability Index)**:
+   - Computes a dynamic **Persuadability Score (0-100)** across key voter segments (18-24 Suburban Youth, 25-34 Working Professionals, Semi-Urban Women 35-54, Rural Agrarian Youth, Regional Diaspora).
+   - Specifies optimal resource allocation: candidate physical travel locations, town hall subjects, and high-ROI digital ad micro-targeting.
+
+3. **Issue-to-Action Translation (The "Policy Gap" Detector)**:
+   - Measures **Grievance-to-Policy Alignment**: cross-references public anxiety share against leadership communication share across 14 issue clusters.
+   - Highlights critical communication disconnects (e.g. public anxiety on exam integrity up 40% with only 6% communication share) and prescribes specific talking point injections.
+
+4. **Opposition Vulnerability & Counter-Attack Window Tracker**:
+   - Measures the **Opposition Backlash Index (OBI)** on opposition statements, candidate gaffes, and regional coalition disputes.
+   - Identifies active **Capitalization Windows** (<12h immediate, 24-48h) to transition campaign strategy from defensive response to offensive contrast.
+
+5. **Strategic Leadership Action Recommendation Feed**:
+   - A unified executive command feed prioritizing actions (`High 🔴`, `Medium 🟡`, `Low 🟢`) by Trigger Event, Target Audience, and Recommended Leadership Action.
+
+6. **Influencer Sentiment Alignment & Suburban Swing Predictor**:
+   - Tracks opinionated creator accounts with >200K followers to assess net favorable/critical slant and tone shift as an early indicator of wider suburban voter swings.
 
 ---
 

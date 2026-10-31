@@ -29,15 +29,18 @@ def _get_neural_party_model():
             _NEURAL_PARTY_TOKENIZER = AutoTokenizer.from_pretrained(_BERT_PARTY_DIR)
             _NEURAL_PARTY_MODEL = AutoModelForSequenceClassification.from_pretrained(_BERT_PARTY_DIR)
             _NEURAL_PARTY_MODEL.eval()
-            _NEURAL_PARTY_MODEL.to("cuda" if torch.cuda.is_available() else "cpu")
+            try:
+                _NEURAL_PARTY_MODEL.to("cuda" if torch.cuda.is_available() else "cpu")
+            except Exception:
+                _NEURAL_PARTY_MODEL.to("cpu")
         except Exception:
-            _NEURAL_PARTY_MODEL = None
-    return _NEURAL_PARTY_TOKENIZER, _NEURAL_PARTY_MODEL
+            _NEURAL_PARTY_MODEL = False
+    return _NEURAL_PARTY_TOKENIZER, (_NEURAL_PARTY_MODEL if _NEURAL_PARTY_MODEL is not False else None)
 
 _NEURAL_PARTY_CACHE: dict[str, Optional[Tuple[str, float]]] = {}
 
 
-def prewarm_party_neural(texts: List[str], batch_size: int = 64) -> None:
+def prewarm_party_neural(texts: List[str], batch_size: int = 32) -> None:
     """Run the party model over unseen texts in padded batches and cache (label, confidence) results."""
     import torch
     tok, mod = _get_neural_party_model()
@@ -60,6 +63,10 @@ def prewarm_party_neural(texts: List[str], batch_size: int = 64) -> None:
             conf, idx = probs.max(dim=-1)
         for text, i, c in zip(chunk, idx.tolist(), conf.tolist()):
             _NEURAL_PARTY_CACHE[text] = (idx2party[i] if i < len(idx2party) else "None", float(c))
+    if device.type == "cuda":
+        mod.to("cpu")
+        import torch
+        torch.cuda.empty_cache()
 
 
 def predict_party_neural(text: str) -> Optional[Tuple[str, float]]:

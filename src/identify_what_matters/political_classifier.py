@@ -24,6 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from identify_what_matters import onnx_backend
 from identify_what_matters.political_pulse import political_pulse_engine
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "political_models"
@@ -141,6 +142,74 @@ def _load_transformer(task: str):
         return None
 
 
+def _task_classes(task_dir: Path) -> list | None:
+    run_file = task_dir / "training_run.json"
+    return json.loads(run_file.read_text()).get("classes") if run_file.exists() else None
+
+
+def _transformer_available(task: str) -> bool:
+    """True when an ONNX or PyTorch transformer exists for `task`; does not load PyTorch when ONNX is present."""
+    task_dir = MODELS_DIR / f"mdeberta-{task}"
+    if onnx_backend.onnx_path(task_dir) is not None:
+        return True
+    return _load_transformer(task) is not None
+
+
+_TRANSFORMER_CACHE: dict[tuple[str, str], tuple] = {}
+
+
+def prewarm_political_transformers(texts: list[str], tasks: tuple = ("is_political", "direction"), batch_size: int = 32) -> None:
+    """Batch-evaluates texts through the fine-tuned transformers (using ONNX if available, else PyTorch) and populates _TRANSFORMER_CACHE."""
+    for task in tasks:
+        task_dir = MODELS_DIR / f"mdeberta-{task}"
+        todo = list(dict.fromkeys(t for t in texts if t and (task, t) not in _TRANSFORMER_CACHE))
+        if not todo:
+            continue
+        if onnx_backend.onnx_path(task_dir) is not None:
+            try:
+                probs = onnx_backend.seq_cls_probs(task_dir, todo, max_length=160, batch_size=batch_size)
+                classes = _task_classes(task_dir)
+                for text_item, prob_row in zip(todo, probs):
+                    _TRANSFORMER_CACHE[(task, text_item)] = (prob_row, classes)
+                continue
+            except Exception:
+                pass
+
+        bundle = _load_transformer(task)
+        if bundle is None:
+            continue
+        import torch
+        tok, tf_model, device, classes = bundle
+        for start in range(0, len(todo), batch_size):
+            chunk = todo[start:start + batch_size]
+            inputs = {k: v.to(device) for k, v in tok(chunk, truncation=True, max_length=160, padding=True, return_tensors="pt").items()}
+            with torch.no_grad():
+                logits = tf_model(**inputs).logits.float()
+                probs = torch.softmax(logits, dim=-1).cpu().numpy()
+            for text_item, prob_row in zip(chunk, probs):
+                _TRANSFORMER_CACHE[(task, text_item)] = (prob_row, classes)
+
+
+def _transformer_probs(task: str, text: str):
+    """(class probabilities, class names) from the ONNX model if exported, else PyTorch; None if unavailable."""
+    if (task, text) in _TRANSFORMER_CACHE:
+        return _TRANSFORMER_CACHE[(task, text)]
+    task_dir = MODELS_DIR / f"mdeberta-{task}"
+    if onnx_backend.onnx_path(task_dir) is not None:
+        probs = onnx_backend.seq_cls_probs(task_dir, [text], max_length=160)[0]
+        return probs, _task_classes(task_dir)
+    bundle = _load_transformer(task)
+    if bundle is None:
+        return None
+    import torch
+    tok, tf_model, device, classes = bundle
+    inputs = {k: v.to(device) for k, v in tok([text], truncation=True, max_length=160, padding=True, return_tensors="pt").items()}
+    with torch.no_grad():
+        logits = tf_model(**inputs).logits.float()
+        probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+    return probs, classes
+
+
 @lru_cache(maxsize=None)
 def _load_model(task: str):
     path = MODELS_DIR / f"{task}_classifier.joblib"
@@ -157,7 +226,7 @@ def models_available() -> dict[str, bool]:
     """What's actually loaded right now, for dashboards/diagnostics to report honestly."""
     res = {}
     for task in TASKS:
-        res[task] = (_load_transformer(task) is not None) or (_load_model(task) is not None)
+        res[task] = _transformer_available(task) or (_load_model(task) is not None)
     return res
 
 
@@ -211,15 +280,10 @@ def _model_predict(task: str, text: str) -> dict[str, Any] | None:
                 pass
 
     # 4. For 'is_political' and 'direction': Use fine-tuned multilingual transformer first
-    tf_bundle = _load_transformer(task)
-    if tf_bundle is not None:
+    tf_probs = _transformer_probs(task, text)
+    if tf_probs is not None:
         try:
-            import torch
-            tok, tf_model, device, classes = tf_bundle
-            inputs = {k: v.to(device) for k, v in tok([text], truncation=True, max_length=160, padding=True, return_tensors="pt").items()}
-            with torch.no_grad():
-                logits = tf_model(**inputs).logits.float()
-                probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+            probs, classes = tf_probs
             
             # Direction calibration: enforce strong lexicon priors with negation awareness
             if task == "direction":

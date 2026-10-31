@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from identify_what_matters import onnx_backend
 from identify_what_matters.instagram_access import scrub
 from identify_what_matters.utils import get_torch_device
 
@@ -155,6 +156,9 @@ def _load(name: str):
 
 
 def _probs(name: str, pairs: list[tuple[str, str]]):
+    if onnx_backend.onnx_path(ROOT / name):
+        first, second = zip(*pairs)
+        return onnx_backend.seq_cls_probs(ROOT / name, list(first), list(second), max_length=256).tolist()
     import torch
     tokenizer, model, device = _load(name)
     out = []

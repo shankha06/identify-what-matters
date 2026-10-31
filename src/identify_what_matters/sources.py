@@ -6,6 +6,8 @@ Every fetch is independent; an unreachable source is recorded in `availability`,
 from __future__ import annotations
 
 import html
+import math
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -211,14 +213,18 @@ def reddit(
     retry_backoff_seconds: float = 5.0,
 ) -> list[dict]:
     """Fetch hot, new, or time-filtered top posts with optional comment samples."""
-    if sort not in {"hot", "new", "top"}:
-        raise ValueError("sort must be 'hot', 'new', or 'top'")
+    if sort not in {"hot", "new", "top", "rising", "controversial"}:
+        raise ValueError("sort must be 'hot', 'new', 'top', 'rising', or 'controversial'")
     if time_filter not in {"hour", "day", "week", "month", "year", "all"}:
         raise ValueError("time_filter must be hour, day, week, month, year, or all")
     if not 0 <= retries <= 5:
         raise ValueError("retries must be between 0 and 5")
     if retry_backoff_seconds < 0.5:
         raise ValueError("retry_backoff_seconds must be at least 0.5")
+    if os.environ.get("API_KEY"):
+        return reddit_apidirect(subreddit, limit, comment_limit, comment_depth, sort, time_filter)
+    if sort in {"rising", "controversial"}:
+        raise ValueError(f"sort='{sort}' requires API_KEY; the scraper fallback does not support it")
     post_limit = min(max(limit, 1), 100)
     sampled_comment_limit = min(max(comment_limit, 0), 100)
     headers = REDDIT_HEADERS
@@ -296,6 +302,95 @@ def reddit(
             },
             "comments": comments,
             "url": "https://www.reddit.com" + permalink,
+        })
+    return signals
+
+
+APIDIRECT_REDDIT_URL = "https://apidirect.io/v1/reddit/subreddit/posts"
+APIDIRECT_COMMENTS_URL = "https://apidirect.io/v1/reddit/post/comments"
+APIDIRECT_POSTED_AGO = {"hour": "1h", "day": "24h", "week": "7d", "month": "30d", "year": "12m", "all": "all"}
+APIDIRECT_SORT = {"hot": "hot", "new": "most_recent", "top": "top", "rising": "rising", "controversial": "controversial"}
+
+
+def _apidirect_time(value: str | None) -> str | None:
+    if not value:
+        return None
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
+
+
+def _apidirect_comments(post_id: str, limit: int, depth: int, api_key: str) -> list[dict]:
+    response = requests.get(
+        APIDIRECT_COMMENTS_URL,
+        params={"post_id": post_id, "sort_by": "top", "pages": min(max(math.ceil(limit / 50), 1), 80)},
+        headers={"X-API-Key": api_key},
+        timeout=60,
+    )
+    response.raise_for_status()
+    kept = [c for c in response.json().get("comments", [])
+            if (c.get("depth") or 0) < max(1, depth) and c.get("text") and c["text"] not in {"[deleted]", "[removed]"}][:limit]
+    return [{
+        "id": c.get("comment_id"),
+        "parent_id": c.get("parent_id"),
+        "body": c["text"],
+        "score": c.get("upvotes"),
+        "reply_count": sum(other.get("parent_id") == c.get("comment_id") for other in kept),
+        "depth": c.get("depth"),
+        "created_at": _apidirect_time(c.get("date")),
+        "url": c.get("url", ""),
+    } for c in kept]
+
+
+def reddit_apidirect(subreddit: str, limit: int = 40, comment_limit: int = 0, comment_depth: int = 2,
+                     sort: str = "hot", time_filter: str = "day") -> list[dict]:
+    """Reddit posts and comment samples via API Direct."""
+    api_key = os.environ.get("API_KEY")
+    if not api_key:
+        raise RuntimeError("API_KEY is not set")
+    post_limit = min(max(limit, 1), 100)
+    sampled_comment_limit = min(max(comment_limit, 0), 100)
+    params: dict[str, int | str] = {"subreddit": subreddit, "sort_by": APIDIRECT_SORT[sort],
+                                    "pages": min(max(math.ceil(post_limit / 25), 1), 40)}
+    windowed = sort in {"top", "controversial"}
+    if windowed:
+        params["posted_ago"] = APIDIRECT_POSTED_AGO[time_filter]
+    response = requests.get(APIDIRECT_REDDIT_URL, params=params, headers={"X-API-Key": api_key}, timeout=60)
+    response.raise_for_status()
+    listing_name = f"{sort}_{time_filter}" if windowed else sort
+    signals = []
+    for post in response.json().get("posts", [])[:post_limit]:
+        if post.get("stickied"):
+            continue
+        comments: list[dict] = []
+        if sampled_comment_limit and post.get("comments"):
+            try:
+                comments = _apidirect_comments(post["post_id"], sampled_comment_limit, comment_depth, api_key)
+                comment_status = "fetched"
+            except requests.RequestException as error:
+                comment_status = f"unavailable:{type(error).__name__}"
+        else:
+            comment_status = "no_comments" if sampled_comment_limit else "not_requested"
+        signals.append({
+            "source": "reddit",
+            "feed": f"r/{subreddit}/{listing_name}",
+            "listing_sort": sort,
+            "listing_time_filter": time_filter if windowed else None,
+            "post_id": post.get("post_id"),
+            "title": post.get("title", ""),
+            "published_at": _apidirect_time(post.get("date")),
+            "engagement": {
+                "score": post.get("upvotes"),
+                "comments": post.get("comments"),
+                "upvote_ratio": post.get("upvote_ratio"),
+                "awards": None,
+                "crossposts": post.get("crossposts"),
+            },
+            "comment_sample": {"requested": sampled_comment_limit, "retrieved": len(comments), "status": comment_status},
+            "comment_interactions": {
+                "score_total": sum(c.get("score") or 0 for c in comments),
+                "replies_total": sum(c.get("reply_count") or 0 for c in comments),
+            },
+            "comments": comments,
+            "url": post.get("url", ""),
         })
     return signals
 
