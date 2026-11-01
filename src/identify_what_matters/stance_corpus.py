@@ -47,9 +47,10 @@ def regional_for(domain: str, round_index: int) -> str:
     return codes[(DOMAINS.index(domain) * 5 + round_index) % len(codes)]
 
 
-def prompt_for(domain: str, round_index: int, used: list[str]) -> str:
+def prompt_for(domain: str, round_index: int, used: list[str], profile: str = "standard",
+               style_examples: list[dict] | None = None) -> str:
     regional = regional_for(domain, round_index)
-    return (
+    prompt = (
         "Generate training data for a model that reads Indian Instagram comments under a contested post and decides "
         "which side of the debate each comment backs, and its tone.\n" + NOISY_STYLE +
         f"Domain: {domain.replace('_', ' ')} in India.\n"
@@ -73,6 +74,28 @@ def prompt_for(domain: str, round_index: int, used: list[str]) -> str:
         '"...", "..."], "comments": [{"text": "...", "language": "hinglish", "side": 0, "tone": "critical", '
         '"sarcastic": false, "off_topic": false}]}]} with keys d0, d1.'
     )
+    if profile in ("short_reactions", "micro_reactions"):
+        prompt = prompt.replace("at least 3 sarcastic comments", "exactly 2 sarcastic comments")
+        prompt += (
+            "\nHard-example profile: at least 10 of the 16 comments must be 6-60 characters, with uneven spelling, "
+            "very short native-script reactions and natural code switching. Avoid polished explanatory sentences. "
+            "Include sarcastic criticism phrased as praise WITHOUT laughter emojis or explicit sarcasm words. "
+            "Include literal supportive praise and sincere laughter WITH emojis that are NOT sarcastic. "
+            "Include implicit stance, negation, disagreement with another commenter, requests for evidence, and "
+            "comments that mention a side without endorsing it. Tone is intended meaning, not surface polarity. "
+            "Keep exactly two sarcastic comments per discussion; do not treat every joke or emoji as sarcasm. "
+            "Vary supportive, critical, humorous and neutral tones across the sixteen comments."
+        )
+    if profile == "micro_reactions":
+        prompt = prompt.replace("Comments 6-200 chars.", "Comments 6-60 chars. Most comments should be 6-35 chars.")
+        prompt += ("\nMandatory length quota: at least 12 comments per discussion must be at most 60 characters, "
+                   "including spaces. Do not explain the label inside the comment. Use fragments, not essays. "
+                   "Exactly two comments must have sarcastic=true. Include at least one comment of each tone.")
+    if style_examples:
+        prompt += ("\nTraining-only style/label references follow. Do NOT copy their wording, entities, or events; "
+                   "invent new fictional situations and comments with similar brevity and ambiguity: "
+                   + json.dumps(style_examples, ensure_ascii=False))
+    return prompt
 
 
 def validate(payload: dict, domain: str, round_index: int, split: str | None = None) -> list[dict]:
@@ -98,6 +121,9 @@ def validate(payload: dict, domain: str, round_index: int, split: str | None = N
                 raise ValueError("comment_text")
             if side not in (0, 1, 2, None) or tone not in TONES or language not in ("en", "hi", "hinglish", regional):
                 raise ValueError("comment_labels")
+            if (side is not None and type(side) is not int) or any(
+                    type(comment.get(field)) is not bool for field in ("sarcastic", "off_topic")):
+                raise ValueError("label_types")
             if language == "hi" and not re.search("[\u0900-\u097f]", text):
                 raise ValueError("hindi_script")
             if language == regional and not re.search(f"[{REGIONAL[regional]}]", text):
@@ -111,24 +137,46 @@ def validate(payload: dict, domain: str, round_index: int, split: str | None = N
         if any(unsafe(text) for text in [caption, question, *positions]):
             raise ValueError("identifier")
         accepted.append({"discussion_id": f"{domain}.r{round_index}.d{position}", "domain": domain,
-                         "round": round_index, "split": split or SPLIT_OF_ROUND[round_index], "origin": "synthetic",
+                         "round": round_index, "split": split or SPLIT_OF_ROUND.get(round_index, "train"), "origin": "synthetic",
                          "caption": " ".join(caption.split()), "question": " ".join(question.split()),
                          "positions": [" ".join(p.split()) for p in positions], "comments": cleaned})
     return accepted
 
 
 def generate(args):
+    style_examples = []
+    style_hash = None
+    if args.style_seeds:
+        seed_path = Path(args.style_seeds)
+        if not seed_path.name.endswith("train.jsonl"):
+            raise ValueError("style_seeds_must_be_train_split")
+        style_hash = hashlib.sha256(seed_path.read_bytes()).hexdigest()
+        with seed_path.open(encoding="utf-8") as handle:
+            seeds = [json.loads(line) for line in handle if line.strip()]
+        seeds = [row for row in seeds if row["origin"] == "real_llm_labelled" and not unsafe(row["comment"])]
+        rng = random.Random(42)
+        rng.shuffle(seeds)
+        for tone in range(len(TONES)):
+            chosen = [row for row in seeds if row["label"] == tone][:3]
+            style_examples.extend({"text": row["comment"][:120], "tone": TONES[tone],
+                                   "sarcastic": row["sarcastic"]} for row in chosen)
     out = Path(args.output)
     (out / "calls").mkdir(parents=True, exist_ok=True)
     (out / "rejected").mkdir(parents=True, exist_ok=True)
     state_path = out / "generation_state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {
-        "created": now(), "origin": "synthetic", "model": args.model, "calls": 0, "usage": [], "failures": []}
-    if state.get("model") != args.model:
-        raise ValueError("resume_model_mismatch")
+        "created": now(), "origin": "synthetic", "model": args.model, "calls": 0, "usage": [], "failures": [],
+        "backend": args.backend, "profile": args.profile, "style_seed_sha256": style_hash}
+    if (state.get("model") != args.model or state.get("backend", "openrouter") != args.backend
+            or state.get("profile", "standard") != args.profile or state.get("style_seed_sha256") != style_hash):
+        raise ValueError("resume_generation_settings_mismatch")
     budget = Budget(state, args.max_calls, args.max_output_tokens)
     state_lock = threading.Lock()
-    client = OpenRouterClient(model=args.model, max_tokens=args.max_tokens, temperature=0.8)
+    if args.backend == "gateway":
+        from identify_what_matters.llm import GatewayClientWrapper
+        client = GatewayClientWrapper(model=args.model, max_tokens=args.max_tokens, temperature=0.7)
+    else:
+        client = OpenRouterClient(model=args.model, max_tokens=args.max_tokens, temperature=0.8)
 
     def run_domain(domain):
         for round_index in range(args.rounds):
@@ -138,10 +186,11 @@ def generate(args):
             used = [d["question"] for r in range(round_index) if (out / "calls" / f"{domain}.r{r}.json").exists()
                     for d in json.loads((out / "calls" / f"{domain}.r{r}.json").read_text())["discussions"]]
             for attempt in range(args.attempts):
-                if not budget.reserve(args.max_tokens * 2, calls=2):
+                retries = 3 if args.backend == "gateway" else 2
+                if not budget.reserve(args.max_tokens * retries, calls=retries):
                     return
                 try:
-                    response = client.generate(user_prompt=prompt_for(domain, round_index, used), request_timeout=240,
+                    response = client.generate(user_prompt=prompt_for(domain, round_index, used, args.profile, style_examples), request_timeout=240,
                                                system_instruction="You produce strict JSON datasets. Output only the JSON object.")
                 except Exception as error:
                     state["failures"].append({"call": f"{domain}.r{round_index}", "category": type(error).__name__})
@@ -150,6 +199,18 @@ def generate(args):
                                        "output_tokens": response.output_tokens})
                 try:
                     discussions = validate(parse_payload(response.text), domain, round_index, args.split)
+                    if args.profile == "micro_reactions":
+                        for discussion in discussions:
+                            comments = discussion["comments"]
+                            if sum(len(comment["text"]) <= 60 for comment in comments) < 12:
+                                raise ValueError("short_comment_quota")
+                            if sum(comment["sarcastic"] for comment in comments) != 2:
+                                raise ValueError("sarcasm_quota")
+                            if set(comment["tone"] for comment in comments) != set(TONES):
+                                raise ValueError("tone_coverage")
+                    if args.profile != "standard":
+                        for discussion in discussions:
+                            discussion["discussion_id"] = f"{args.profile}.{discussion['discussion_id']}"
                 except Exception as error:
                     (out / "rejected" / f"{domain}.r{round_index}.a{attempt}.txt").write_text(response.text)
                     state["failures"].append({"call": f"{domain}.r{round_index}", "category": str(error)[:60]})
@@ -255,13 +316,16 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     generation = commands.add_parser("generate")
     generation.add_argument("--output", default="artifacts/stance_corpus")
-    generation.add_argument("--rounds", type=int, default=8, choices=range(1, 9))
+    generation.add_argument("--rounds", type=int, default=8, choices=range(1, 33))
     generation.add_argument("--attempts", type=int, default=2)
     generation.add_argument("--workers", type=int, default=8)
     generation.add_argument("--max-tokens", type=int, default=7000)
     generation.add_argument("--max-calls", type=int, default=170)
     generation.add_argument("--max-output-tokens", type=int, default=900000)
     generation.add_argument("--model", default=MODEL)
+    generation.add_argument("--backend", choices=("openrouter", "gateway"), default="openrouter")
+    generation.add_argument("--profile", choices=("standard", "short_reactions", "micro_reactions"), default="standard")
+    generation.add_argument("--style-seeds")
     generation.add_argument("--split", choices=("train", "dev", "test"))
     generation.add_argument("--only", nargs="+", choices=DOMAINS)
     generation.set_defaults(handler=generate)

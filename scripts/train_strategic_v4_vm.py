@@ -34,6 +34,7 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoConfig, get_cosine_schedule_with_warmup
 from transformers.models.deberta_v2.modeling_deberta_v2 import DebertaV2Model, ContextPooler
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
 
 SEED = 42
 random.seed(SEED)
@@ -108,9 +109,8 @@ class OrdinalDistanceLoss(nn.Module):
     def forward(self, logits, targets):
         ce = F.cross_entropy(logits, targets, weight=self.weight, label_smoothing=self.label_smoothing)
         probs = F.softmax(logits, dim=-1) # (batch_size, num_classes)
-        expected_rank = torch.sum(probs * self.rank_indices.unsqueeze(0), dim=-1) # (batch_size,)
-        target_rank = targets.float()
-        rank_dist = torch.abs(expected_rank - target_rank).mean()
+        distances = torch.abs(self.rank_indices.unsqueeze(0) - targets.float().unsqueeze(1))
+        rank_dist = torch.sum(probs * distances, dim=-1).mean()
         return ce + self.alpha * rank_dist
 
 class StrategicDataset(Dataset):
@@ -285,6 +285,24 @@ def main():
 
     print(f"Loaded {len(train_samples)} massive training samples, {len(gold_samples)} gold benchmark samples.")
 
+    normalize = lambda text: " ".join(str(text).casefold().split())
+    reporting_texts = {normalize(row["text"]) for row in gold_samples}
+    labels_by_text = {}
+    unique = {}
+    label_keys = ("threat_axis", "criticality", "authenticity", "trajectory_stage")
+    for row in train_samples:
+        key = normalize(row["text"])
+        if not key or key in reporting_texts:
+            continue
+        labels_by_text.setdefault(key, set()).add(tuple(row[label] for label in label_keys))
+        unique[key] = row
+    train_samples = [row for key, row in unique.items() if len(labels_by_text[key]) == 1]
+    train_samples, dev_samples = train_test_split(
+        train_samples, test_size=0.15, random_state=SEED,
+        stratify=[row["threat_axis"] for row in train_samples],
+    )
+    print(f"Deduplicated, reporting-excluded training rows={len(train_samples)}, dev rows={len(dev_samples)}")
+
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     model = MultiTaskStrategicClassifierV4(args.base_model).to(device)
 
@@ -315,13 +333,9 @@ def main():
     warmup_steps = int(total_steps * 0.10)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
-    best_composite_f1 = 0.0
+    best_composite_f1 = -1.0
     out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"\n--- Zero-Shot Pre-Trained Weights Evaluation on {len(gold_samples)} Gold Benchmark ---")
-    init_res = evaluate_on_benchmark(model, tokenizer, gold_samples, device)
-    print(f"Zero-Shot: Axis F1: {init_res['axis_f1']:.3f} | Crit F1: {init_res['crit_f1']:.3f} (MAE {init_res['crit_mae']:.2f}) | Auth F1: {init_res['auth_f1']:.3f} | Stage F1: {init_res['stage_f1']:.3f} (MAE {init_res['stage_mae']:.2f}) | Composite F1: {init_res['composite_f1']:.3f}\n")
+    out_dir.mkdir(parents=True, exist_ok=False)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -355,7 +369,7 @@ def main():
         avg_loss = total_loss / len(train_loader)
         epoch_dur = time.time() - start_t
 
-        eval_res = evaluate_on_benchmark(model, tokenizer, gold_samples, device)
+        eval_res = evaluate_on_benchmark(model, tokenizer, dev_samples, device)
         print(f"Epoch {epoch:2d}/{args.epochs} [{epoch_dur:.1f}s] - Train Loss: {avg_loss:.4f} | "
               f"Axis Acc: {eval_res['axis_accuracy']:.1%} (F1: {eval_res['axis_f1']:.3f}) | "
               f"Crit Acc: {eval_res['crit_accuracy']:.1%} (F1: {eval_res['crit_f1']:.3f}, MAE: {eval_res['crit_mae']:.2f}) | "
@@ -367,19 +381,27 @@ def main():
             best_composite_f1 = eval_res["composite_f1"]
             print(f"  🏆 New Best Composite F1: {best_composite_f1:.4f}! Saving checkpoint...")
             
-            torch.save(model.state_dict(), out_dir / "pytorch_model.bin")
+            torch.save(model.state_dict(), out_dir / "strategic_heads.pt")
+            model.deberta.save_pretrained(str(out_dir))
             tokenizer.save_pretrained(str(out_dir))
             model.config.save_pretrained(str(out_dir))
             
-            with open(out_dir / "eval_metrics.json", "w", encoding="utf-8") as f:
+            with open(out_dir / "dev_metrics.json", "w", encoding="utf-8") as f:
                 json.dump({
                     "epoch": epoch,
-                    "benchmark_samples": len(gold_samples),
+                    "selection_split": "internal_dev",
+                    "dev_samples": len(dev_samples),
                     "train_samples": len(train_samples),
                     **eval_res
                 }, f, indent=2)
 
-    print(f"\n✅ Training complete! Best Composite F1 on 2,285 Gold Benchmark: {best_composite_f1:.4f}")
+    model.load_state_dict(torch.load(out_dir / "strategic_heads.pt", map_location=device, weights_only=True))
+    final_metrics = evaluate_on_benchmark(model, tokenizer, gold_samples, device)
+    with open(out_dir / "eval_metrics.json", "w", encoding="utf-8") as metrics_file:
+        json.dump({"selection_split": "internal_dev", "reporting_rows": len(gold_samples),
+                   "legacy_benchmark_previously_used_for_selection": True,
+                   "args": vars(args), **final_metrics}, metrics_file, indent=2)
+    print(json.dumps({"final_reporting_metrics": final_metrics}), flush=True)
 
 if __name__ == "__main__":
     main()

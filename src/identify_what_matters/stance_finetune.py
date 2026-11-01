@@ -23,28 +23,62 @@ TONES = ("supportive", "critical", "humorous", "neutral")
 
 def rows(dataset: str, task: str, split: str) -> list[dict]:
     path = Path(dataset, f"{task}_{split}.jsonl")
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if not path.exists():
+        path = Path(dataset, f"{split}.jsonl")
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
 def pair_of(task: str, row: dict) -> tuple[str, str]:
     return (row["position"], row["comment"]) if task == "stance" else (row["context"], row["comment"])
 
 
+def augmented_training_rows(dataset: str, task: str, extra: str | list[str] | None = None) -> tuple[list[dict], dict]:
+    train_rows = rows(dataset, task, "train")
+    stats = {"base_rows": len(train_rows), "extra_rows": 0, "duplicates_or_holdout_overlap": 0}
+    if not extra:
+        return train_rows, stats
+    normalize = lambda text: " ".join(str(text).casefold().split())
+    key_of = lambda row: tuple(normalize(text) for text in pair_of(task, row))
+    excluded = {key_of(row) for split in ("train", "dev", "test") for row in rows(dataset, task, split)}
+    heldout_comments = {normalize(row["comment"]) for split in ("dev", "test") for row in rows(dataset, task, split)}
+    for source in [extra] if isinstance(extra, str) else extra:
+        with Path(source).open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                key = key_of(row)
+                if key in excluded or normalize(row["comment"]) in heldout_comments:
+                    stats["duplicates_or_holdout_overlap"] += 1
+                    continue
+                excluded.add(key)
+                train_rows.append(row)
+                stats["extra_rows"] += 1
+    return train_rows, stats
+
+
 def train(args):
     import torch
     from datasets import Dataset
+    from sklearn.metrics import f1_score
     from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding, Trainer,
-                              TrainingArguments)
+                              TrainingArguments, set_seed)
 
     output = Path(args.output)
     if output.exists():
         raise SystemExit(f"{output} exists; refusing to overwrite")
     labels = 2 if args.task == "stance" else len(TONES)
+    class_names = ("not_backing", "backing") if args.task == "stance" else TONES
+    set_seed(args.seed)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     # fp32 master weights: some hub checkpoints (mDeBERTa-xnli) are stored in fp16 and diverge to NaN otherwise.
     model = AutoModelForSequenceClassification.from_pretrained(args.base_model, num_labels=labels,
-                                                               ignore_mismatched_sizes=True, dtype=torch.float32)
-    train_rows = rows(args.dataset, args.task, "train")
+                                                               ignore_mismatched_sizes=True, dtype=torch.float32,
+                                                               id2label=dict(enumerate(class_names)),
+                                                               label2id={name: index for index, name in enumerate(class_names)})
+    train_rows, augmentation = augmented_training_rows(args.dataset, args.task, args.extra_train)
+    dev_rows = rows(args.dataset, args.task, "dev")
     real = [r for r in train_rows if r["origin"] != "synthetic"]
     train_rows += real * (args.real_repeat - 1)
 
@@ -59,6 +93,9 @@ def train(args):
     columns = ["position", "comment", "label"] if args.task == "stance" else ["context", "comment", "label"]
     data = Dataset.from_list([{k: r[k] for k in columns} for r in train_rows]).shuffle(seed=args.seed)
     data = data.map(encode, batched=True, remove_columns=[c for c in columns if c != "label"]).rename_column("label", "labels")
+    dev_data = Dataset.from_list([{key: row[key] for key in columns} for row in dev_rows])
+    dev_data = dev_data.map(encode, batched=True,
+                            remove_columns=[column for column in columns if column != "label"]).rename_column("label", "labels")
     weights = None
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if args.task == "stance":
@@ -83,15 +120,30 @@ def train(args):
     training_args = TrainingArguments(
         output_dir=str(output) + "-work", num_train_epochs=args.epochs, per_device_train_batch_size=args.batch_size,
         learning_rate=args.lr, warmup_steps=max(1, total_steps // 10), weight_decay=0.01, bf16=True, seed=args.seed,
-        logging_steps=50, save_strategy="no", report_to="none", lr_scheduler_type="linear")
+        logging_steps=100, eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True,
+        metric_for_best_model="macro_f1", greater_is_better=True, save_total_limit=1, save_only_model=True,
+        disable_tqdm=True, report_to="none", lr_scheduler_type="linear")
     started = time.time()
-    WeightedTrainer(model=model, args=training_args, train_dataset=data,
-                    data_collator=DataCollatorWithPadding(tokenizer)).train()
+    def dev_metrics(output):
+        if args.task == "stance":
+            logits = output.predictions
+            probabilities = np.exp(logits - logits.max(axis=-1, keepdims=True))
+            probabilities = probabilities[:, 1] / probabilities.sum(axis=-1)
+            threshold = best_threshold(dev_rows, probabilities)
+            return {"macro_f1": stance_metrics(dev_rows, probabilities, threshold)["macro_f1"]}
+        return {"macro_f1": float(f1_score(output.label_ids, output.predictions.argmax(axis=-1),
+                                         average="macro", zero_division=0))}
+    trainer = WeightedTrainer(model=model, args=training_args, train_dataset=data, eval_dataset=dev_data,
+                              compute_metrics=dev_metrics,
+                              data_collator=DataCollatorWithPadding(tokenizer))
+    trainer.train()
     model.save_pretrained(str(output))
     tokenizer.save_pretrained(str(output))
     (output / "training_run.json").write_text(json.dumps({
         "task": args.task, "base_model": args.base_model, "dataset": args.dataset, "train_rows": len(train_rows),
         "real_rows": len(real), "real_repeat": args.real_repeat, "epochs": args.epochs, "batch_size": args.batch_size,
+        "selection_split": "dev", "dev_rows": len(dev_rows), "dev_macro_f1": trainer.state.best_metric,
+        "augmentation": augmentation, "extra_train": args.extra_train,
         "lr": args.lr, "max_length": args.max_length, "seconds": round(time.time() - started, 1),
         "gpu": torch.cuda.get_device_name(0), "labels": "LLM judgements (synthetic OpenRouter + real-comment briefs)",
         "human_gold": False}, indent=2))
@@ -104,9 +156,13 @@ def scores_for(model_path: str, task: str, data: list[dict], device: str, zero_s
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     run_file = Path(model_path, "training_run.json")
-    # Saved sentencepiece tokenizers do not always round-trip in transformers 5; the base model's tokenizer is identical.
-    tokenizer_source = json.loads(run_file.read_text())["base_model"] if run_file.exists() else model_path
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+    settings = json.loads(run_file.read_text()) if run_file.exists() else {}
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    except (OSError, ValueError, KeyError, TypeError):
+        if not run_file.exists():
+            raise
+        tokenizer = AutoTokenizer.from_pretrained(json.loads(run_file.read_text())["base_model"])
     model = AutoModelForSequenceClassification.from_pretrained(model_path).to(device).eval()
     outputs = []
     if zero_shot:
@@ -117,7 +173,7 @@ def scores_for(model_path: str, task: str, data: list[dict], device: str, zero_s
         pairs = [pair_of(task, r) for r in data]
     for start in range(0, len(pairs), 128):
         first, second = zip(*pairs[start:start + 128])
-        batch = tokenizer(list(first), list(second), truncation=True, max_length=256, padding=True,
+        batch = tokenizer(list(first), list(second), truncation=True, max_length=settings.get("max_length", 256), padding=True,
                           return_tensors="pt").to(device)
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             probs = torch.softmax(model(**batch).logits.float(), dim=-1).cpu().numpy()
@@ -213,6 +269,7 @@ def main():
     training.add_argument("--task", choices=("stance", "tone"), required=True)
     training.add_argument("--dataset", required=True)
     training.add_argument("--base-model", required=True)
+    training.add_argument("--extra-train", nargs="+", help="Additional training-only JSONL; dev/reporting splits remain unchanged")
     training.add_argument("--output", required=True)
     training.add_argument("--epochs", type=int, default=3)
     training.add_argument("--batch-size", type=int, default=32)

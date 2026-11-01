@@ -14,7 +14,7 @@ model = AutoModelForSequenceClassification.from_pretrained(mod_dir).cuda().eval(
 PARTIES_17 = [
     "BJP", "Congress", "AAP", "TMC", "SP", "DMK",
     "Shiv Sena", "NCP", "RJD", "JDU", "AIADMK",
-    "TDP", "YSRCP", "BRS", "BSP", "CPIM", "None"
+    "TDP", "YSRCP", "BRS", "BSP", "CPIM", "CJP", "None"
 ]
 
 y_true = []

@@ -12,13 +12,14 @@ Dedicated Neural Demographic Classifier (v3) using Supervised Contrastive Repres
 - Optimizer:
     - AdamW with eps=1e-6, weight_decay=0.01, cosine learning rate scheduler with warmup
 - Online Validation:
-    - Evaluates on the 192-sample real-world gold standard benchmark at every epoch and saves best checkpoint
+    - Selects checkpoints on internal validation; reports the legacy benchmark only after selection
 """
 
 import os
 import json
 import random
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -92,7 +93,7 @@ class MultiTaskContrastiveDemographics(nn.Module):
     def __init__(self, base_model_name, num_mental=6, num_age=5, proj_dim=128):
         super().__init__()
         self.config = AutoConfig.from_pretrained(base_model_name)
-        self.encoder = AutoModel.from_pretrained(base_model_name, config=self.config)
+        self.encoder = AutoModel.from_pretrained(base_model_name, config=self.config, dtype=torch.float32)
         hidden_size = self.config.hidden_size
 
         # Contrastive Projection Head
@@ -220,6 +221,21 @@ def evaluate_on_benchmark(model, tokenizer, gold_samples, device):
         "y_pred_a": y_pred_a
     }
 
+def report_selected_checkpoint(args, gold_samples):
+    tokenizer = AutoTokenizer.from_pretrained(args.output_dir)
+    model = MultiTaskContrastiveDemographics(args.output_dir).to(args.device)
+    heads = torch.load(Path(args.output_dir) / "demographic_heads.pt", map_location=args.device, weights_only=True)
+    model.mental_head.load_state_dict(heads["mental_head"])
+    model.age_head.load_state_dict(heads["age_head"])
+    model.proj_head.load_state_dict(heads["proj_head"])
+    reporting = evaluate_on_benchmark(model, tokenizer, gold_samples, args.device)
+    result = {key: value for key, value in reporting.items() if not key.startswith("y_")}
+    result.update({"selection_split": "internal_dev", "legacy_benchmark_previously_used_for_selection": True,
+                   "args": vars(args)})
+    (Path(args.output_dir) / "reporting_results.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps({"final_reporting_metrics": result}), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-file", default="artifacts/demographics_models/synthetic_demographics_balanced_v2.jsonl")
@@ -230,19 +246,20 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1.8e-5)
     parser.add_argument("--contrastive-weight", type=float, default=0.35)
+    parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    print(f"Loading data from {args.data_file}...")
     samples = []
-    with open(args.data_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                item = json.loads(line.strip())
-                if item.get("mental_state") in MENTAL2ID:
-                    samples.append(item)
-
-    print(f"Total valid training samples: {len(samples)}")
+    if not args.report_only:
+        print(f"Loading data from {args.data_file}...")
+        with open(args.data_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    item = json.loads(line.strip())
+                    if item.get("mental_state") in MENTAL2ID:
+                        samples.append(item)
+        print(f"Total valid training samples: {len(samples)}")
 
     print(f"Loading gold standard benchmark from {args.gold_file}...")
     gold_samples = []
@@ -251,6 +268,24 @@ def main():
             if line.strip():
                 gold_samples.append(json.loads(line.strip()))
     print(f"Total gold samples: {len(gold_samples)}")
+    if args.report_only:
+        report_selected_checkpoint(args, gold_samples)
+        return
+
+    normalize = lambda text: " ".join(str(text).casefold().split())
+    reporting_texts = {normalize(row["text"]) for row in gold_samples}
+    unique = {}
+    labels_by_text = {}
+    for row in samples:
+        key = normalize(row["text"])
+        if not key or key in reporting_texts:
+            continue
+        labels_by_text.setdefault(key, set()).add((row["mental_state"], row.get("age_bracket")))
+        unique[key] = row
+    samples = [row for key, row in unique.items() if len(labels_by_text[key]) == 1]
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
 
     # Stratified split by mental state
     train_samples, val_samples = train_test_split(
@@ -290,13 +325,8 @@ def main():
     warmup_steps = int(total_steps * 0.1)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
-    print("\nInitial Baseline Evaluation on Gold Standard Benchmark:")
-    base_res = evaluate_on_benchmark(model, tokenizer, gold_samples, args.device)
-    print(f"Pre-train Gold Mental State Acc: {base_res['mental_acc']*100:.2f}% | F1: {base_res['mental_f1']:.4f}")
-    print(f"Pre-train Gold Age Bracket Acc:  {base_res['age_acc']*100:.2f}% | F1: {base_res['age_f1']:.4f}")
-
-    best_mental_f1 = 0.0
-    os.makedirs(args.output_dir, exist_ok=True)
+    best_mental_f1 = -1.0
+    os.makedirs(args.output_dir, exist_ok=False)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -317,7 +347,7 @@ def main():
             m_logits, a_logits, proj, _ = model(input_ids, attention_mask, token_type_ids)
 
             loss_m = criterion_mental(m_logits, mental_labels)
-            loss_a = criterion_age(a_logits, age_labels)
+            loss_a = criterion_age(a_logits, age_labels) if (age_labels >= 0).any() else a_logits.sum() * 0.0
             # Contrastive loss pulling same mental states together
             loss_con = criterion_supcon(proj, mental_labels)
 
@@ -334,15 +364,14 @@ def main():
             if (step + 1) % 40 == 0:
                 print(f"Epoch {epoch}/{args.epochs} | Step {step+1}/{len(train_loader)} | Total: {loss.item():.4f} | Mental: {loss_m.item():.4f} | Con: {loss_con.item():.4f}")
 
-        # Gold benchmark evaluation
-        gold_res = evaluate_on_benchmark(model, tokenizer, gold_samples, args.device)
+        validation_res = evaluate_on_benchmark(model, tokenizer, val_samples, args.device)
 
         print(f"\n--- Epoch {epoch} Results ---")
-        print(f"Gold Mental State Acc: {gold_res['mental_acc']*100:.2f}% | F1: {gold_res['mental_f1']:.4f}")
-        print(f"Gold Age Bracket Acc:  {gold_res['age_acc']*100:.2f}% | F1: {gold_res['age_f1']:.4f}")
+        print(f"Dev Mental State Acc: {validation_res['mental_acc']*100:.2f}% | F1: {validation_res['mental_f1']:.4f}")
+        print(f"Dev Age Bracket Acc:  {validation_res['age_acc']*100:.2f}% | F1: {validation_res['age_f1']:.4f}")
 
-        if gold_res["mental_f1"] > best_mental_f1:
-            best_mental_f1 = gold_res["mental_f1"]
+        if validation_res["mental_f1"] > best_mental_f1:
+            best_mental_f1 = validation_res["mental_f1"]
             print(f"⭐ New Best Model! (Mental F1: {best_mental_f1:.4f}) Saving to {args.output_dir}...")
             model.encoder.save_pretrained(args.output_dir)
             tokenizer.save_pretrained(args.output_dir)
@@ -353,10 +382,11 @@ def main():
                 "config": {
                     "mental_classes": MENTAL_CLASSES,
                     "age_classes": AGE_CLASSES,
-                    "best_gold_mental_acc": gold_res["mental_acc"],
-                    "best_gold_mental_f1": gold_res["mental_f1"],
-                    "best_gold_age_acc": gold_res["age_acc"],
-                    "best_gold_age_f1": gold_res["age_f1"],
+                    "selection_split": "internal_dev",
+                    "best_dev_mental_acc": validation_res["mental_acc"],
+                    "best_dev_mental_f1": validation_res["mental_f1"],
+                    "best_dev_age_acc": validation_res["age_acc"],
+                    "best_dev_age_f1": validation_res["age_f1"],
                     "epoch": epoch
                 }
             }, os.path.join(args.output_dir, "demographic_heads.pt"))
@@ -364,13 +394,14 @@ def main():
             with open(os.path.join(args.output_dir, "eval_results.json"), "w") as f:
                 json.dump({
                     "epoch": epoch,
-                    "mental_accuracy": gold_res["mental_acc"],
-                    "mental_macro_f1": gold_res["mental_f1"],
-                    "age_accuracy": gold_res["age_acc"],
-                    "age_macro_f1": gold_res["age_f1"]
+                    "selection_split": "internal_dev",
+                    "mental_accuracy": validation_res["mental_acc"],
+                    "mental_macro_f1": validation_res["mental_f1"],
+                    "age_accuracy": validation_res["age_acc"],
+                    "age_macro_f1": validation_res["age_f1"]
                 }, f, indent=2)
 
-    print(f"\nTraining Complete. Best Gold Mental F1: {best_mental_f1:.4f}")
+    report_selected_checkpoint(args, gold_samples)
 
 if __name__ == "__main__":
     main()

@@ -42,8 +42,8 @@ DEMO_DATA_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "demographic
 OUTPUT_DIR = DEMO_DATA_DIR / "party_lean_corpus"
 SYNTHETIC_PATH = DEMO_DATA_DIR / "synthetic_dataset.jsonl"
 
-# The 7 party classes we want — matches demographics_trainer.py SEED_SAMPLES targets
-PARTIES = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "None"]
+# Party classes. CJP = Cockroach Janta Party (emerging youth-led movement; see docs/MODEL_AUDIT_RCA.md).
+PARTIES = ["BJP", "Congress", "AAP", "TMC", "SP", "DMK", "CJP", "None"]
 
 # Per-class generation scenarios designed to produce IMPLICIT signals, not just explicit mentions.
 # Each scenario describes context + examples to guide the LLM to produce diverse, realistic samples.
@@ -90,6 +90,13 @@ PARTY_SCENARIOS = {
         "Criticizing BJP's anti-federalism, NEP education policy, NEET in Tamil Nadu",
         "Religious minority support, anti-Hindutva narrative in Tamil Nadu context",
     ],
+    "CJP": [
+        "Youth-led anti-establishment satire and memes mocking politicians and the Cockroach Janta Party movement",
+        "Protest mobilisation against electoral roll revision (SIR) and voter-rights concerns, Bengaluru and Mumbai rallies",
+        "Support for CJP's call to hold leaders accountable for unemployment, paper leaks and rising costs",
+        "Criticizing mainstream parties (BJP, Congress, AAP) as the same old system; CJP as a fresh youth alternative",
+        "Civic participation: sharing CJP events, volunteer sign-ups, and calls to join the movement",
+    ],
     "None": [
         "Non-partisan civic complaint: pothole, water supply, pollution, traffic, local issue",
         "Personal issue: job search, family, health, education cost, entertainment, food",
@@ -108,6 +115,7 @@ AGE_DIST = {
     "TMC": ["25-34", "35-54", "55+", "35-54"],
     "SP": ["18-24", "25-34", "18-24", "25-34"],
     "DMK": ["18-24", "25-34", "35-54", "25-34"],
+    "CJP": ["18-24", "18-24", "25-34", "25-34"],
     "None": ["18-24", "25-34", "35-54", "18-24", "25-34", "35-54"],
 }
 
@@ -131,6 +139,7 @@ def _prompt_for_party(party: str, scenario: str, round_idx: int) -> str:
         "TMC": "supporter of Trinamool Congress/Mamata Banerjee",
         "SP": "supporter of Samajwadi Party/Akhilesh Yadav",
         "DMK": "supporter of DMK/MK Stalin/Dravidian politics",
+        "CJP": "supporter of the Cockroach Janta Party (CJP), a youth-led anti-establishment movement",
         "None": "non-partisan citizen who avoids party affiliation",
     }
     lean = party_context[party]

@@ -174,6 +174,36 @@ def _probs(name: str, pairs: list[tuple[str, str]]):
 SARCASTIC_EMOJIS = set("😂🤣😜😏🤡💀")
 
 
+@lru_cache(maxsize=2)
+def _load_sarcasm(model_path: str):
+    import joblib
+    model = joblib.load(model_path)
+    if set(map(str, model.classes_)) != {"False", "True"}:
+        raise ValueError("Sarcasm model must predict False/True labels")
+    settings = Path(model_path).with_name("sarcasm_threshold.json")
+    threshold = float(json.loads(settings.read_text())["threshold"]) if settings.exists() else 0.5
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("Sarcasm threshold must be between 0 and 1")
+    return model, threshold
+
+
+def _sarcasm_flags(pairs: list[tuple[str, str]]) -> list[bool] | None:
+    """Sarcasm flags from the trained sarcasm model (context, comment) pairs; None means use the heuristic."""
+    sarcasm_path = os.environ.get("TRENDS_SARCASM_MODEL")
+    default_path = ROOT / "sarcasm" / "sarcastic_classifier.joblib"
+    if not sarcasm_path and default_path.exists():
+        sarcasm_path = str(default_path)
+    if not sarcasm_path or not pairs:
+        return None
+    try:
+        model, threshold = _load_sarcasm(str(Path(sarcasm_path).resolve()))
+        true_index = list(map(str, model.classes_)).index("True")
+        probabilities = model.predict_proba([f"{context} || Comment: {comment}" for context, comment in pairs])
+        return [bool(p) for p in probabilities[:, true_index] >= threshold]
+    except Exception:
+        return None
+
+
 def label_comments_batch(jobs: list[tuple[str, list[str], list[str]]]) -> list[list[dict]]:
     """Label several (context, positions, comments) jobs with one batched pass per model (tone and stance)."""
     threshold = json.loads((ROOT / "stance" / "stance_threshold.json").read_text())["threshold"] \
@@ -183,15 +213,19 @@ def label_comments_batch(jobs: list[tuple[str, list[str], list[str]]]) -> list[l
         tone_pairs += [(context, c) for c in comments]
         stance_pairs += [(f"{context} || Position: {p}", c) for c in comments for p in positions]
     tones = _probs("tone", tone_pairs) if tone_pairs else []
+    sarcasm = _sarcasm_flags(tone_pairs)
     backs = _probs("stance", stance_pairs) if stance_pairs else []
     results, tone_at, back_at = [], 0, 0
     for context, positions, comments in jobs:
         labels = []
         for i, c in enumerate(comments):
             p = tones[tone_at]
+            model_sarcastic = sarcasm[tone_at] if sarcasm is not None else None
             tone_at += 1
             tone = TONES[max(range(len(TONES)), key=p.__getitem__)]
             sarcastic = any(e in c for e in SARCASTIC_EMOJIS) or (tone == "humorous" and any(w in c.lower() for w in ("lol", "lmao", "sarcasm", "waah", "kya baat")))
+            if model_sarcastic is not None:
+                sarcastic = model_sarcastic
             labels.append({"c": i, "tone": tone, "sarcastic": sarcastic, "side": None})
         if positions:
             for i, label in enumerate(labels):

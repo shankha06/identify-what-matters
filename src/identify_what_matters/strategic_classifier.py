@@ -96,9 +96,6 @@ class MultiTaskStrategicClassifier(nn.Module):
 
 def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
     global _MODEL_CACHE
-    if "model" in _MODEL_CACHE:
-        return _MODEL_CACHE["model"], _MODEL_CACHE["tokenizer"], _MODEL_CACHE["device"]
-
     if model_dir is None:
         v4_dir = Path(__file__).resolve().parent.parent.parent / "artifacts" / "strategic_models" / "strategic_mdeberta_v4"
         v3_dir = Path(__file__).resolve().parent.parent.parent / "artifacts" / "strategic_models" / "strategic_mdeberta_v3"
@@ -113,7 +110,10 @@ def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
         else:
             model_dir = v1_dir
 
-    model_dir = Path(model_dir)
+    model_dir = Path(model_dir).resolve()
+    cache_key = str(model_dir)
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
     if not model_dir.exists() or not (model_dir / "strategic_heads.pt").exists():
         return None, None, None
 
@@ -148,15 +148,10 @@ def load_strategic_model(model_dir: Optional[Union[str, Path]] = None):
             model.to(device)
         model.eval()
 
-        _MODEL_CACHE["model"] = model
-        _MODEL_CACHE["tokenizer"] = tokenizer
-        _MODEL_CACHE["device"] = device
+        _MODEL_CACHE[cache_key] = (model, tokenizer, device)
         return model, tokenizer, device
     except Exception as e:
         print(f"Warning: Failed to load Strategic Neural Classifier from {model_dir}: {e}")
-        _MODEL_CACHE["model"] = None
-        _MODEL_CACHE["tokenizer"] = None
-        _MODEL_CACHE["device"] = None
         return None, None, None
 
 def classify_strategic(text: str, max_length: int = 128) -> Dict[str, Any]:

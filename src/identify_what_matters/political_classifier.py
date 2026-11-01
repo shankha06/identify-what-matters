@@ -59,7 +59,7 @@ SPECIAL_CLUSTER_PATTERNS = {
 
 IS_POLITICAL_RE = re.compile(
     r"\b(?:modi|bjp|congress|election|electoral|minister|government|parliament|assembly|policy|protest|"
-    r"kejriwal|yogi|dmk|tvk|rahul gandhi|mamata|stalin|aap|tmc|cpim|rjd|jdu|bsp|ncp|shiv ?sena)\b", re.I)
+    r"kejriwal|yogi|dmk|tvk|rahul gandhi|mamata|stalin|aap|tmc|cpim|rjd|jdu|bsp|ncp|shiv ?sena|cockroach ?janta ?party)\b", re.I)
 
 # Entity recognizer patterns for high-precision entity target routing
 ENTITY_TARGET_PATTERNS = {
@@ -73,6 +73,7 @@ ENTITY_TARGET_PATTERNS = {
     "CPIM": re.compile(r"\b(cpim|cpi|left front|pinarayi)\b", re.I),
     "Shiv Sena": re.compile(r"\b(shiv sena|shinde|uddhav|thackeray)\b", re.I),
     "NCP": re.compile(r"\b(ncp|sharad pawar|ajit pawar)\b", re.I),
+    "CJP": re.compile(r"\b(cockroach ?janta ?party|cockroachjantaparty|cockroachisback)\b", re.I),
     "Election Commission": re.compile(r"\b(election commission|eci|cec|gyanesh kumar)\b", re.I),
     "Judiciary": re.compile(r"\b(supreme court|high court|cji|chief justice|judiciary|bench)\b", re.I),
     "Police": re.compile(r"\b(police|cops|dsp|sho|constable|dgp)\b", re.I),
@@ -230,6 +231,39 @@ def models_available() -> dict[str, bool]:
     return res
 
 
+def _direction_calibrate(scores: dict[str, float], text: str) -> dict[str, float]:
+    """Applies lexicon priors for pro/anti-incumbent and pro-opposition framing, with negation awareness."""
+    from identify_what_matters.political_pulse import (
+        PRO_RULING_MARKERS, ANTI_RULING_MARKERS, PRO_OPPOSITION_MARKERS,
+        _PRO_RULING_IMPLICIT, _ANTI_RULING_IMPLICIT, check_phrase_valence
+    )
+    low = text.lower()
+    pro_r_hits, neg_r_hits = check_phrase_valence(text, PRO_RULING_MARKERS)
+    pro_o_hits, neg_o_hits = check_phrase_valence(text, PRO_OPPOSITION_MARKERS)
+    anti_r_hits = 1 if ANTI_RULING_MARKERS.search(text) else 0
+
+    pro_gov = (pro_r_hits > 0 or any(w in low for w in _PRO_RULING_IMPLICIT)) and neg_r_hits == 0 and anti_r_hits == 0
+    anti_gov = anti_r_hits > 0 or neg_r_hits > 0 or any(w in low for w in _ANTI_RULING_IMPLICIT)
+    pro_opp = pro_o_hits > 0 and neg_o_hits == 0
+
+    if pro_gov and not anti_gov:
+        if "pro_incumbent" in scores:
+            scores["pro_incumbent"] += 0.35
+        if "anti_incumbent" in scores:
+            scores["anti_incumbent"] = max(0.0, scores["anti_incumbent"] - 0.20)
+    elif anti_gov and not pro_gov:
+        if "anti_incumbent" in scores:
+            scores["anti_incumbent"] += 0.40
+        if "pro_incumbent" in scores:
+            scores["pro_incumbent"] = max(0.0, scores["pro_incumbent"] - 0.30)
+    elif pro_opp and not pro_gov:
+        if "pro_opposition" in scores:
+            scores["pro_opposition"] += 0.35
+        if "pro_incumbent" in scores:
+            scores["pro_incumbent"] = max(0.0, scores["pro_incumbent"] - 0.20)
+    return scores
+
+
 def _model_predict(task: str, text: str) -> dict[str, Any] | None:
     if len(text.strip()) < MIN_TEXT_LEN:
         return None
@@ -279,43 +313,36 @@ def _model_predict(task: str, text: str) -> dict[str, Any] | None:
             except Exception:
                 pass
 
-    # 4. For 'is_political' and 'direction': Use fine-tuned multilingual transformer first
-    tf_probs = _transformer_probs(task, text)
-    if tf_probs is not None:
+    # 4. 'direction': n-gram model + fine-tuned mDeBERTa ensemble, then lexicon calibration
+    if task == "direction":
+        model = _load_model("direction")
+        if model is not None:
+            try:
+                tf_probs, tf_classes = _transformer_probs(task, text)
+                cand_probs = model.predict_proba([text])[0]
+                combined = {str(c): 0.55 * float(cand_probs[i]) for i, c in enumerate(model.classes_)}
+                for i, c in enumerate(tf_classes):
+                    if c in combined:
+                        combined[c] += 0.45 * float(tf_probs[i])
+                combined = _direction_calibrate(combined, text)
+                best_val = max(combined, key=combined.get)
+                total_mass = sum(combined.values())
+                conf = round(float(combined[best_val] / total_mass), 3) if total_mass > 0 else 0.5
+                return {"value": best_val, "confidence": conf, "source": "ensemble"}
+            except Exception:
+                pass
+
+    # 4b. 'is_political' (and direction without its joblib model): fine-tuned transformer, ONNX first
+    tf_result = _transformer_probs(task, text)
+    if tf_result is not None:
         try:
-            probs, classes = tf_probs
-            
-            # Direction calibration: enforce strong lexicon priors with negation awareness
-            if task == "direction":
-                from identify_what_matters.political_pulse import (
-                    PRO_RULING_MARKERS, ANTI_RULING_MARKERS, PRO_OPPOSITION_MARKERS,
-                    _PRO_RULING_IMPLICIT, _ANTI_RULING_IMPLICIT, check_phrase_valence
-                )
-                low = text.lower()
-                pro_r_hits, neg_r_hits = check_phrase_valence(text, PRO_RULING_MARKERS)
-                pro_o_hits, neg_o_hits = check_phrase_valence(text, PRO_OPPOSITION_MARKERS)
-                anti_r_hits = 1 if ANTI_RULING_MARKERS.search(text) else 0
-
-                pro_gov = (pro_r_hits > 0 or any(w in low for w in _PRO_RULING_IMPLICIT)) and neg_r_hits == 0 and anti_r_hits == 0
-                anti_gov = anti_r_hits > 0 or neg_r_hits > 0 or any(w in low for w in _ANTI_RULING_IMPLICIT)
-                pro_opp = pro_o_hits > 0 and neg_o_hits == 0
-
-                if pro_gov and not anti_gov:
-                    if "pro_incumbent" in classes:
-                        probs[classes.index("pro_incumbent")] += 0.50
-                    if "anti_incumbent" in classes:
-                        probs[classes.index("anti_incumbent")] = max(0.0, probs[classes.index("anti_incumbent")] - 0.30)
-                elif anti_gov and not pro_gov:
-                    if "anti_incumbent" in classes:
-                        probs[classes.index("anti_incumbent")] += 0.60
-                    if "pro_incumbent" in classes:
-                        probs[classes.index("pro_incumbent")] = max(0.0, probs[classes.index("pro_incumbent")] - 0.50)
-                elif pro_opp and not pro_gov:
-                    if "pro_opposition" in classes:
-                        probs[classes.index("pro_opposition")] += 0.50
-                    if "pro_incumbent" in classes:
-                        probs[classes.index("pro_incumbent")] = max(0.0, probs[classes.index("pro_incumbent")] - 0.30)
-
+            probs, classes = tf_result
+            if task == "direction" and classes:
+                scores = _direction_calibrate({c: float(p) for c, p in zip(classes, probs)}, text)
+                val = max(scores, key=scores.get)
+                total_mass = sum(scores.values())
+                conf = round(float(scores[val] / total_mass), 3) if total_mass > 0 else 0.5
+                return {"value": val, "confidence": conf, "source": "transformer"}
             idx = int(probs.argmax())
             val = classes[idx] if classes and idx < len(classes) else str(idx)
             if task == "is_political":
